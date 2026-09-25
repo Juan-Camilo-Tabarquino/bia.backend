@@ -1,8 +1,6 @@
 package config
 
-import (
-    "fmt"
-    "github.com/spf13/viper"
+import (	"github.com/spf13/viper"
 )
 
 // Config holds the minimal configuration required for the MVP.
@@ -11,7 +9,8 @@ import (
 //   SERVER_PORT   -> HTTP listening port (default 8080)
 //   READINGS_CSV  -> path to the readings CSV (env var READINGS_CSV, default assets/readings.csv)
 //   EVENTS_CSV    -> path to the events CSV (env var EVENTS_CSV, default assets/events.csv)
-//   LLM_API_KEY   -> API key for the LLM provider (env var LLM_API_KEY, required)
+//   LLM_API_KEY   -> API key for the LLM provider (env var LLM_API_KEY). Optional:
+//                    when unset/empty the deterministic mock provider is used.
 //
 // Environment variables override values from config.yaml.
 // The function Load() reads config.yaml (if present), applies defaults, binds environment variables,
@@ -41,7 +40,7 @@ func Load() (*Config, error) {
     }
 
     // Defaults (can be overridden by config file or env vars)
-    v.SetDefault("server.port", 8080)
+    v.SetDefault("server.port", 3001)
     v.SetDefault("data.readings_csv", "assets/readings.csv")
     v.SetDefault("data.events_csv", "assets/events.csv")
     v.SetDefault("llm.api_key", "")
@@ -58,16 +57,14 @@ func Load() (*Config, error) {
     cfg.EventsCSV = v.GetString("data.events_csv")
     cfg.LLMAPIKey = v.GetString("llm.api_key")
 
-    // Basic validation: required environment value for LLM API key
-    if cfg.LLMAPIKey == "" {
-        return nil, fmt.Errorf("LLM_API_KEY environment variable is required but not set")
-    }
+    // Ensure defaults for CSV paths if empty after env loading
     if cfg.ReadingsCSV == "" {
-        return nil, fmt.Errorf("readings CSV path is empty; provide via READINGS_CSV or config.yaml")
+        cfg.ReadingsCSV = "assets/readings.csv"
     }
     if cfg.EventsCSV == "" {
-        return nil, fmt.Errorf("events CSV path is empty; provide via EVENTS_CSV or config.yaml")
+        cfg.EventsCSV = "assets/events.csv"
     }
+    // No other validation; errors are only returned if Viper fails to read the config file
 
     return &cfg, nil
 }

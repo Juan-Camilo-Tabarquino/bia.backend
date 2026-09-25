@@ -1,6 +1,10 @@
 package analysis
 
-import "github.com/neuralium/ai-energy/internal/domain/models"
+import (
+	"strings"
+
+	"github.com/neuralium/ai-energy/internal/domain/models"
+)
 
 // QualityChecker defines an interface for filtering readings based on quality criteria.
 // The interface expects a method that takes a slice of models.Reading and returns a slice
@@ -29,6 +33,18 @@ type qualityChecker struct{}
 func NewQualityChecker() QualityChecker {return &qualityChecker{}}
 
 func (q *qualityChecker) Check(readings []models.Reading) []models.Reading {
-    // No quality filtering is currently applied; return the input unchanged.
-    return readings
+	// Keep the original order while dropping readings that fail the rules below.
+	kept := make([]models.Reading, 0, len(readings))
+	for _, r := range readings {
+		if r.Consumption < 0 {
+			continue
+		}
+		// A non-empty status must be "ok" (trimmed, case-insensitive); an empty
+		// status means the source did not report a quality indicator.
+		if r.Status != "" && !strings.EqualFold(strings.TrimSpace(r.Status), "ok") {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
 }

@@ -1,29 +1,157 @@
 package analysis
 
-import "github.com/neuralium/ai-energy/internal/domain/models"
+import (
+	"fmt"
+	"math"
+	"sort"
+
+	"github.com/neuralium/ai-energy/internal/domain/models"
+)
 
 // Detector identifies anomalies based on baseline statistics.
-// A reading is considered anomalous if its consumption is greater than
-// mean + 3*stdDev or the relative increase over the baseline mean is 45% or more.
+//
+// The deterministic rules are:
+//   - a consumption spike when a reading is more than three standard deviations
+//     above the baseline mean or at least 45% above it;
+//   - a consumption drop when a reading is at least 55% below the baseline mean,
+//     which captures planned outages that the pure increase rule cannot see;
+//   - a data-quality candidate when consumption stays close to the meter's own
+//     hour-of-day median but the electrical readings are inconsistent (voltage
+//     outside the nominal band or a power factor below a sane threshold).
+//
+// The data-quality rule is deliberately evaluated only for readings that are not
+// already a consumption anomaly, so an elevated reading with a low power factor
+// (a genuine electrical problem) is never downgraded to a data-quality issue.
 
 type Detector interface {
-    Detect(readings []models.Reading, baseline map[string]models.Baseline) []models.AnomalyCandidate
+	Detect(readings []models.Reading, baseline map[string]models.Baseline) []models.AnomalyCandidate
 }
 
-// anomalyDetector implements the simple rule‑based detector described above.
+const (
+	// spikeRatioThreshold is the relative increase over the baseline mean that
+	// qualifies as a consumption spike.
+	spikeRatioThreshold = 0.45
+	// dropRatioThreshold is the relative decrease below the baseline mean that
+	// qualifies as a consumption drop.
+	dropRatioThreshold = 0.55
+	// nearMedianTolerance is how far consumption may sit from the meter's
+	// hour-of-day median and still count as "stable" for data-quality checks.
+	nearMedianTolerance = 0.25
+	// voltageMin and voltageMax bound a sane mains voltage band (220 V +/- 5%).
+	voltageMin = 209.0
+	voltageMax = 231.0
+	// powerFactorMin is the lowest power factor considered healthy.
+	powerFactorMin = 0.85
+)
+
+// anomalyDetector implements the rule-based detector described above.
 
 type anomalyDetector struct{}
 
 func NewAnomalyDetector() Detector { return &anomalyDetector{} }
 
 func (d *anomalyDetector) Detect(readings []models.Reading, baseline map[string]models.Baseline) []models.AnomalyCandidate {
-    var out []models.AnomalyCandidate
-    for _, r := range readings {
-        b, ok := baseline[string(r.MeterID)]
-        if !ok { continue }
-        if r.Consumption > b.Mean+3*b.StdDev || (r.Consumption-b.Mean)/b.Mean >= 0.45 {
-            out = append(out, models.AnomalyCandidate{MeterID: r.MeterID, Timestamp: r.Timestamp, Delta: r.Consumption - b.Mean, Raw: r})
-        }
-    }
-    return out
+	hourlyMedian := hourlyConsumptionMedians(readings)
+	var out []models.AnomalyCandidate
+	for _, r := range readings {
+		b, ok := baseline[string(r.MeterID)]
+		if !ok || b.Mean == 0 {
+			continue
+		}
+		delta := (r.Consumption - b.Mean) / b.Mean
+		switch {
+		case r.Consumption > b.Mean+3*b.StdDev || delta >= spikeRatioThreshold:
+			out = append(out, models.AnomalyCandidate{
+				MeterID:   r.MeterID,
+				Timestamp: r.Timestamp,
+				Delta:     delta,
+				Kind:      models.KindConsumptionSpike,
+				Raw:       r,
+			})
+		case -delta >= dropRatioThreshold:
+			out = append(out, models.AnomalyCandidate{
+				MeterID:   r.MeterID,
+				Timestamp: r.Timestamp,
+				Delta:     delta,
+				Kind:      models.KindConsumptionDrop,
+				Raw:       r,
+			})
+		default:
+			reason, inconsistent := electricalInconsistency(r)
+			if inconsistent && consumptionNearHourMedian(hourlyMedian, r) {
+				out = append(out, models.AnomalyCandidate{
+					MeterID:   r.MeterID,
+					Timestamp: r.Timestamp,
+					Delta:     delta,
+					Kind:      models.KindDataQuality,
+					Reason:    reason,
+					Raw:       r,
+				})
+			}
+		}
+	}
+	return out
+}
+
+// hourlyConsumptionMedians returns, for every meter, the median consumption per
+// hour of day. Using the median removes the strong diurnal cycle and keeps the
+// data-quality check independent from the magnitude of the daily peak.
+func hourlyConsumptionMedians(readings []models.Reading) map[models.MeterID]map[int]float64 {
+	grouped := make(map[models.MeterID]map[int][]float64)
+	for _, r := range readings {
+		byHour := grouped[r.MeterID]
+		if byHour == nil {
+			byHour = make(map[int][]float64)
+			grouped[r.MeterID] = byHour
+		}
+		hour := r.Timestamp.Hour()
+		byHour[hour] = append(byHour[hour], r.Consumption)
+	}
+	out := make(map[models.MeterID]map[int]float64, len(grouped))
+	for id, byHour := range grouped {
+		medians := make(map[int]float64, len(byHour))
+		for hour, values := range byHour {
+			medians[hour] = median(values)
+		}
+		out[id] = medians
+	}
+	return out
+}
+
+func median(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+	mid := len(sorted) / 2
+	if len(sorted)%2 == 1 {
+		return sorted[mid]
+	}
+	return (sorted[mid-1] + sorted[mid]) / 2
+}
+
+func consumptionNearHourMedian(medians map[models.MeterID]map[int]float64, r models.Reading) bool {
+	byHour, ok := medians[r.MeterID]
+	if !ok {
+		return false
+	}
+	hourMedian, ok := byHour[r.Timestamp.Hour()]
+	if !ok || hourMedian <= 0 {
+		return false
+	}
+	return math.Abs(r.Consumption-hourMedian)/hourMedian <= nearMedianTolerance
+}
+
+// electricalInconsistency reports whether the electrical readings of a single
+// measurement are outside a sane operating range. Zero values are treated as
+// "not reported" so synthetic readings without electrical data stay clean.
+func electricalInconsistency(r models.Reading) (string, bool) {
+	if r.PowerFactor > 0 && r.PowerFactor < powerFactorMin {
+		return fmt.Sprintf("power factor %.3f below %.2f", r.PowerFactor, powerFactorMin), true
+	}
+	if r.Voltage > 0 && (r.Voltage < voltageMin || r.Voltage > voltageMax) {
+		return fmt.Sprintf("voltage %.1f V outside [%.0f, %.0f] V", r.Voltage, voltageMin, voltageMax), true
+	}
+	return "", false
 }

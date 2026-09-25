@@ -1,0 +1,74 @@
+# Backend Implementation SDD Spec
+
+## metadata
+- id: backend-implementation-001
+- version: 0.1.0
+- author: el Gentleman
+- created: 2026-09-24
+- status: draft
+
+## overview
+This OpenSpec specification describes the design and implementation plan for the **AI Energy Management Platform – Backend**. The backend loads meter readings and operational events from CSV files, runs a deterministic analytical pipeline, and produces explainable evidence that is interpreted by an LLM. Results are exposed via a lightweight REST API.
+
+## goals
+- Load CSV data into memory at startup.
+- Perform deterministic data‑quality validation, baseline calculation, anomaly detection, event correlation, classification, and scoring.
+- Generate a structured `Evidence` object per anomaly.
+- Pass evidence to an LLM (optional) for natural‑language explanation and recommendations.
+- Provide a clean HTTP API for consumption by front‑end clients.
+
+## architecture
+```
+cmd/api/main.go          → bootstrap, config, orchestrator, router
+internal/config/         → configuration handling (paths, ports, LLM keys)
+internal/data/csv/        → CSV parsers for readings & events
+internal/data/memory/     → in‑memory repositories for domain entities
+internal/domain/models/  → core structs (Reading, Event, Baseline, Anomaly, Evidence)
+internal/analysis/       → deterministic pipeline stages (quality, baseline, detection, correlation, classification, scoring, evidence)
+internal/ai/agents/      → LLM client (OpenAI, Gemini, mock)
+internal/api/handlers/   → HTTP handlers returning JSON payloads
+internal/api/routes/      → chi router wiring
+```
+
+## data models (internal/domain/models)
+- `Reading` – meter ID, timestamp, consumption, voltage, current, powerFactor.
+- `Event` – ID, type (enum), start, end, description.
+- `Baseline` – mean, stdDev, count per meter.
+- `AnomalyCandidate` – meter ID, timestamp, delta, raw reading.
+- `EventCorrelation` – anomaly, matched events, explains flag.
+- `Evidence` – anomaly, correlation, priority, optional AI‑generated text.
+
+## pipeline (internal/analysis/orchestrator.go)
+1. **Load** readings & events via CSV loaders.
+2. **DataQuality** – `DataQualityChecker.Check` validates ranges, duplicates, negative consumption.
+3. **Baseline** – `BaselineCalculator.Calculate` computes mean/stdDev per meter.
+4. **Detection** – `AnomalyDetector.Detect` flags readings > mean+3σ or delta ≥ 45%.
+5. **Correlation** – `EventCorrelator.Correlate` matches anomalies to events (overlap or within prior hour).
+6. **Classification** – `Classifier.Classify` returns one of `REAL_ANOMALY`, `EXPLAINABLE_ANOMALY`, `FALSE_POSITIVE`, `DATA_QUALITY`.
+7. **Scoring** – `Scorer.Score` assigns priority based on classification and correlation strength.
+8. **EvidenceBuilder** – assembles `Evidence` payload.
+9. **AI Layer (optional)** – `Agent.GenerateExplanation(evidence)` returns `Explanation` and `Recommendation` fields.
+10. **API** – handlers expose `/anomalies` with evidence + AI output.
+
+## API contract (internal/api)
+- `GET /health` – `{status:"ok"}`
+- `GET /meters` – list of meter IDs.
+- `GET /meters/{id}/readings` – optional query `?from=&to=` returns JSON array of readings.
+- `GET /anomalies` – list of all detected anomalies with priority and optional AI fields.
+- `GET /anomalies/{meter_id}` – detailed evidence for a single meter.
+
+## testing strategy
+- Unit tests for each pipeline stage using the four benchmark meters (M‑104, M‑106, M‑109, M‑112) present in `assets/readings.csv` and `assets/events.csv`.
+- Integration test exercising the full orchestrator and confirming expected classifications and severity scores.
+- Mock LLM client ensures deterministic test runs.
+
+## non‑functional requirements
+- Go 1.22+, no external databases.
+- Memory‑only processing; O(N) time, O(M) space where M = distinct meters.
+- Deterministic output; LLM is side‑effect only.
+- Clean error handling, context propagation, and dependency injection.
+
+## open issues
+- Selection of LLM provider and prompt template (to be defined in a later iteration).
+- Pagination for large result sets (future enhancement).
+- Security for API keys (environment‑variable based configuration).
