@@ -80,7 +80,10 @@ func AnalysisGET(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, analysisResultDTO{
 		AnalysisID: id,
 		Status:     "completed",
-		Anomalies:  anomalyDTOs(snapshot),
+		// anomalyDTOs applies the shared DTO mapping and the deterministic
+		// priority ordering, so the stored analysis result matches the
+		// anomalies list endpoint field for field and in the same sequence.
+		Anomalies: anomalyDTOs(snapshot),
 	})
 }
 

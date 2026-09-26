@@ -3,3 +3,10 @@ server:
 data:
   readings_csv: "data/readings.csv"
   events_csv: "data/events.csv"
+# Real LLM narration uses the native Ollama chat API.
+# The committed api_key stays empty on purpose: the real secret is supplied
+# through the LLM_API_KEY environment variable (.env), never checked in.
+llm:
+  base_url: "https://ollama.com"
+  model: "gpt-oss:20b"
+  api_key: ""

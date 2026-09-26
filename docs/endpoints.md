@@ -177,12 +177,15 @@ Source: `internal/api/router.go:43-76`, `internal/domain/models/reading.go:9-18`
     "confidence": 0.9,
     "reason": "consumption spike of +50% vs baseline",
     "recommended_action": "inspect the installation",
-    "status": "unexplained"
+    "status": "unexplained",
+    "llm_analysis": "Deterministic review of meter T-1: consumption is 150.0% above baseline..."
   }
 ]
 ```
 
-An empty evidence set produces `[]`.
+An empty evidence set produces `[]`. `llm_analysis` is present only when the
+LLM produced a narrative for that anomaly; see
+[Anomaly fields are real pipeline values](#anomaly-fields-are-real-pipeline-values).
 
 Source: `internal/api/handlers/endpoints.go:67-77, 90-118, 135-141`.
 
@@ -237,7 +240,8 @@ Source: `internal/api/handlers/ai.go:44-56`.
       "confidence": 0.9,
       "reason": "...",
       "recommended_action": "...",
-      "status": "unexplained"
+      "status": "unexplained",
+      "llm_analysis": "..."
     }
   ]
 }
@@ -280,10 +284,21 @@ values are part of the public contract
 - `type`: `REAL_ANOMALY` | `EXPLAINABLE_ANOMALY` | `FALSE_POSITIVE` | `DATA_QUALITY`.
 - `severity`: `LOW` | `MEDIUM` | `HIGH`.
 - `confidence`: numeric confidence of the detection.
-- `reason`: the human-readable explanation of the deviation.
-- `recommended_action`: the recommended operational action.
+- `reason`: the human-readable explanation of the deviation, from the
+  deterministic pipeline (`models.Evidence.Explanation`). It is always present
+  for an anomaly and is the deterministic source of truth.
+- `recommended_action`: the recommended operational action, from the
+  deterministic pipeline (`models.Evidence.Recommendation`). It is always
+  present for an anomaly and is the deterministic source of truth.
 - `status`: `explained` when an operational event explains the deviation,
   otherwise `unexplained`.
+- `llm_analysis`: the LLM-generated interpretation of the anomaly
+  (`models.Evidence.LLMText`). It is an **additional** narrative, never a
+  replacement: `type`, `severity`, `confidence`, `reason` and
+  `recommended_action` always come from the deterministic pipeline.
+  `llm_analysis` may be **absent/empty** when no LLM provider is configured or
+  when the provider call failed; because the field is `omitempty`, an empty
+  narrative is omitted from the JSON entirely and the key does not appear.
 
 `id` is derived deterministically from `meter_id` plus `detected_at`, and
 `detected_at` is the UTC RFC3339 rendering of the anomaly timestamp.

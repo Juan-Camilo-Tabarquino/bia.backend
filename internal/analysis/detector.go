@@ -59,38 +59,53 @@ func (d *anomalyDetector) Detect(readings []models.Reading, baseline map[string]
 			continue
 		}
 		delta := (r.Consumption - b.Mean) / b.Mean
+		// candidate builds a fully enriched candidate for the current reading.
+		// The detection rules stay unchanged: only the kind (and, for data
+		// quality, the reason) differ between the branches below, while every
+		// percentage is derived from the reading and the meter baseline.
+		candidate := func(kind models.AnomalyKind, reason string) models.AnomalyCandidate {
+			return models.AnomalyCandidate{
+				MeterID:              r.MeterID,
+				Timestamp:            r.Timestamp,
+				Delta:                delta,
+				Kind:                 kind,
+				Reason:               reason,
+				Raw:                  r,
+				Baseline:             b,
+				ConsumptionChangePct: delta * 100,
+				VoltageChangePct:     signedChangePct(r.Voltage, b.VoltageMean),
+				CurrentChangePct:     signedChangePct(r.Current, b.CurrentMean),
+				PowerFactorChangePct: signedChangePct(r.PowerFactor, b.PowerFactorMean),
+			}
+		}
 		switch {
 		case r.Consumption > b.Mean+3*b.StdDev || delta >= spikeRatioThreshold:
-			out = append(out, models.AnomalyCandidate{
-				MeterID:   r.MeterID,
-				Timestamp: r.Timestamp,
-				Delta:     delta,
-				Kind:      models.KindConsumptionSpike,
-				Raw:       r,
-			})
+			out = append(out, candidate(models.KindConsumptionSpike, ""))
 		case -delta >= dropRatioThreshold:
-			out = append(out, models.AnomalyCandidate{
-				MeterID:   r.MeterID,
-				Timestamp: r.Timestamp,
-				Delta:     delta,
-				Kind:      models.KindConsumptionDrop,
-				Raw:       r,
-			})
+			out = append(out, candidate(models.KindConsumptionDrop, ""))
 		default:
 			reason, inconsistent := electricalInconsistency(r)
 			if inconsistent && consumptionNearHourMedian(hourlyMedian, r) {
-				out = append(out, models.AnomalyCandidate{
-					MeterID:   r.MeterID,
-					Timestamp: r.Timestamp,
-					Delta:     delta,
-					Kind:      models.KindDataQuality,
-					Reason:    reason,
-					Raw:       r,
-				})
+				out = append(out, candidate(models.KindDataQuality, reason))
 			}
 		}
 	}
 	return out
+}
+
+// signedChangePct returns the signed relative change of value against mean, in
+// percent.
+//
+// A zero baseline mean carries no scale, so the change is reported as exactly 0
+// instead of NaN or +/-Inf. This is the documented division-by-zero rule for
+// all per-signal changes and keeps the enriched payload finite and
+// JSON-serialisable for signals whose baseline is absent (for example a meter
+// that never reports a power factor).
+func signedChangePct(value, mean float64) float64 {
+	if mean == 0 {
+		return 0
+	}
+	return (value - mean) / mean * 100
 }
 
 // hourlyConsumptionMedians returns, for every meter, the median consumption per

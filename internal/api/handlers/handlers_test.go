@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -60,7 +61,9 @@ func TestAnomalyIDIsSharedAndDeterministic(t *testing.T) {
 	}
 	// ...and the detail endpoint builds its body through newAnomalyDTO.
 	detail := newAnomalyDTO(evidence)
-	if detail != list[0] {
+	// AnomalyDTO now carries a slice (correlated_events), so it is no longer
+	// comparable with ==; compare the list entry and the detail body by value.
+	if !reflect.DeepEqual(detail, list[0]) {
 		t.Fatalf("list entry and detail body disagree:\nlist   %+v\ndetail %+v", list[0], detail)
 	}
 

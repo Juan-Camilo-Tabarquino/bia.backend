@@ -33,9 +33,10 @@ func main() {
 	scorer := analysis.NewScorer()
 	builder := analysis.NewEvidenceBuilder()
 
-	// Select the LLM from configuration: LLM_API_KEY set -> real provider,
-	// unset -> deterministic mock (the default).
-	llm := ai.NewProvider(cfg.LLMAPIKey)
+	// Select the LLM from configuration: LLM_API_KEY set -> real Ollama
+	// provider, unset -> deterministic mock (the default). LLM_BASE_URL and
+	// LLM_MODEL carry the endpoint and the model:tag for the real provider.
+	llm := ai.NewProvider(cfg.LLMAPIKey, cfg.LLMBaseURL, cfg.LLMModel)
 	orchestrator := analysis.NewOrchestrator(loader, rrepo, erepo,
 		quality, baseline, detector, correlator, classifier, scorer, llm, builder)
 

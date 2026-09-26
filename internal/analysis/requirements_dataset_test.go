@@ -41,8 +41,8 @@ func TestRequirementsDatasetOutcomes(t *testing.T) {
 		t.Fatal("expected non-empty evidence, got an empty slice")
 	}
 	for _, e := range evidence {
-		t.Logf("produced meter=%s kind=%s type=%s severity=%s confidence=%.4f status=%s priority=%d",
-			e.Anomaly.MeterID, e.Anomaly.Kind, e.Type, e.Severity, e.Confidence, e.Status, e.Priority)
+		t.Logf("produced meter=%s kind=%s type=%s severity=%s confidence=%.4f status=%s priority=%d events=%d",
+			e.Anomaly.MeterID, e.Anomaly.Kind, e.Type, e.Severity, e.Confidence, e.Status, e.Priority, len(e.Correlation.Events))
 	}
 
 	expected := []struct {
@@ -83,6 +83,12 @@ func TestRequirementsDatasetOutcomes(t *testing.T) {
 		}
 		if got.Status == "" {
 			t.Errorf("meter %s: status is empty", want.meter)
+		}
+		// The candidate must carry the per-meter baseline it was compared
+		// against, so consumers can report the statistics behind the
+		// classification without re-deriving them.
+		if got.Anomaly.Baseline.Mean == 0 || got.Anomaly.Baseline.Count == 0 {
+			t.Errorf("meter %s: candidate does not carry the meter baseline: %+v", want.meter, got.Anomaly.Baseline)
 		}
 	}
 

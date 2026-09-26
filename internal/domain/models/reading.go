@@ -64,6 +64,22 @@ type AnomalyCandidate struct {
 	Kind      AnomalyKind
 	Reason    string // human-readable trigger detail, currently used for data quality
 	Raw       Reading
+
+	// Baseline is the per-meter statistics the candidate was compared against.
+	// Carrying it on the candidate lets every consumer (API, LLM payloads)
+	// report the exact baseline behind the classification instead of
+	// re-deriving it, and keeps the detection rules unchanged.
+	Baseline Baseline
+
+	// Per-signal signed relative changes in percent against the meter's
+	// baseline means. ConsumptionChangePct mirrors Delta*100 and keeps the
+	// original Delta semantics; the electrical signals are computed from their
+	// own baselines. A signal whose baseline mean is zero reports a 0 change
+	// (never NaN or +/-Inf).
+	ConsumptionChangePct float64
+	VoltageChangePct     float64
+	CurrentChangePct     float64
+	PowerFactorChangePct float64
 }
 
 // EventCorrelation records if the anomaly is explained.
@@ -73,10 +89,19 @@ type EventCorrelation struct {
 	Explains bool
 }
 
+// Baseline holds the per-meter statistics the detector compares a reading
+// against. Mean, StdDev and Count describe consumption and keep their original
+// meaning (the standard deviation uses Bessel's correction). The voltage,
+// current and power-factor means are computed over the same reading slice so
+// every signal can be expressed relative to its own baseline.
 type Baseline struct {
 	Mean   float64
 	StdDev float64
 	Count  int
+
+	VoltageMean     float64
+	CurrentMean     float64
+	PowerFactorMean float64
 }
 
 type Evidence struct {

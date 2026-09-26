@@ -117,6 +117,88 @@ data:
 	}
 }
 
+// TestLoad_LLMDefaults proves the LLM endpoint defaults when neither YAML nor
+// the environment supplies values.
+func TestLoad_LLMDefaults(t *testing.T) {
+	dir := chdirToTempDir(t)
+	writeConfigYAML(t, dir, "server:\n  port: 3001\n")
+	// Empty values make Viper treat the env vars as unset, isolating the
+	// defaults from ambient LLM_* values.
+	t.Setenv("LLM_API_KEY", "")
+	t.Setenv("LLM_BASE_URL", "")
+	t.Setenv("LLM_MODEL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if got, want := cfg.LLMBaseURL, "https://ollama.com"; got != want {
+		t.Errorf("LLMBaseURL = %q, want default %q", got, want)
+	}
+	if got, want := cfg.LLMModel, "gpt-oss:20b"; got != want {
+		t.Errorf("LLMModel = %q, want default %q", got, want)
+	}
+	if cfg.LLMAPIKey != "" {
+		t.Errorf("LLMAPIKey = %q, want it empty by default", cfg.LLMAPIKey)
+	}
+}
+
+// TestLoad_LLMReadsYAMLValues proves the three llm keys are honoured from
+// config.yaml and are not shadowed by the hardcoded defaults.
+func TestLoad_LLMReadsYAMLValues(t *testing.T) {
+	dir := chdirToTempDir(t)
+	writeConfigYAML(t, dir, `llm:
+  base_url: "https://yaml.example"
+  model: "yaml-model"
+  api_key: "yaml-key"
+`)
+	t.Setenv("LLM_API_KEY", "")
+	t.Setenv("LLM_BASE_URL", "")
+	t.Setenv("LLM_MODEL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if got, want := cfg.LLMBaseURL, "https://yaml.example"; got != want {
+		t.Errorf("LLMBaseURL = %q, want %q (YAML value was ignored)", got, want)
+	}
+	if got, want := cfg.LLMModel, "yaml-model"; got != want {
+		t.Errorf("LLMModel = %q, want %q (YAML value was ignored)", got, want)
+	}
+	if got, want := cfg.LLMAPIKey, "yaml-key"; got != want {
+		t.Errorf("LLMAPIKey = %q, want %q (YAML value was ignored)", got, want)
+	}
+}
+
+// TestLoad_LLMEnvOverrides proves the LLM_* env vars take precedence over both
+// config.yaml and the defaults.
+func TestLoad_LLMEnvOverrides(t *testing.T) {
+	dir := chdirToTempDir(t)
+	writeConfigYAML(t, dir, `llm:
+  base_url: "https://yaml.example"
+  model: "yaml-model"
+  api_key: "yaml-key"
+`)
+	t.Setenv("LLM_BASE_URL", "https://env.example")
+	t.Setenv("LLM_MODEL", "env-model")
+	t.Setenv("LLM_API_KEY", "env-key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned unexpected error: %v", err)
+	}
+	if got, want := cfg.LLMBaseURL, "https://env.example"; got != want {
+		t.Errorf("LLMBaseURL = %q, want %q (LLM_BASE_URL did not override YAML)", got, want)
+	}
+	if got, want := cfg.LLMModel, "env-model"; got != want {
+		t.Errorf("LLMModel = %q, want %q (LLM_MODEL did not override YAML)", got, want)
+	}
+	if got, want := cfg.LLMAPIKey, "env-key"; got != want {
+		t.Errorf("LLMAPIKey = %q, want %q (LLM_API_KEY did not override YAML)", got, want)
+	}
+}
+
 // TestLoad_DefaultsWhenNoYAMLAndNoEnv proves the fallback defaults are applied
 // when neither config.yaml nor the environment supplies a CSV path.
 //

@@ -2,12 +2,14 @@ package api_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/neuralium/ai-energy/internal/api"
 	"github.com/neuralium/ai-energy/internal/data/csv"
 	"github.com/neuralium/ai-energy/internal/data/memory"
+	"github.com/neuralium/ai-energy/internal/domain/models"
 )
 
 // The hermetic dataset below is generated at runtime, so every test is
@@ -51,10 +54,27 @@ func testEventsCSV() string {
 	return "event_id,event_type,timestamp,description\n"
 }
 
+// failingLLM is a deterministic LLMClient whose explanation call always fails,
+// mirroring a provider that is not configured or is unreachable. The
+// orchestrator leaves LLMText empty in that case.
+type failingLLM struct{}
+
+func (failingLLM) GenerateExplanation(models.Evidence) (string, error) {
+	return "", errors.New("llm provider unavailable")
+}
+
 // newTestEnvironment writes the generated CSVs to a temp dir, builds a real
-// orchestrator over them, runs the pipeline once and returns the router-backed
-// test server plus the orchestrator for direct assertions.
+// orchestrator over them with the deterministic mock LLM, runs the pipeline once
+// and returns the router-backed test server plus the orchestrator.
 func newTestEnvironment(t *testing.T) (*httptest.Server, *analysis.Orchestrator) {
+	t.Helper()
+	return newTestEnvironmentWithLLM(t, analysis.NewMockLLM())
+}
+
+// newTestEnvironmentWithLLM is newTestEnvironment with an injectable LLM client,
+// so tests can exercise the serialization contract for both a populated and an
+// empty LLMText without touching the deterministic pipeline.
+func newTestEnvironmentWithLLM(t *testing.T, llm analysis.LLMClient) (*httptest.Server, *analysis.Orchestrator) {
 	t.Helper()
 	dir := t.TempDir()
 	readingsPath := filepath.Join(dir, "readings.csv")
@@ -76,7 +96,7 @@ func newTestEnvironment(t *testing.T) (*httptest.Server, *analysis.Orchestrator)
 		analysis.NewEventCorrelator(),
 		analysis.NewClassifier(),
 		analysis.NewScorer(),
-		analysis.NewMockLLM(),
+		llm,
 		analysis.NewEvidenceBuilder(),
 	)
 	if err := orchestrator.Run(); err != nil {
@@ -88,7 +108,41 @@ func newTestEnvironment(t *testing.T) (*httptest.Server, *analysis.Orchestrator)
 	return server, orchestrator
 }
 
-// anomalyBody mirrors the API anomaly DTO decoded by the tests.
+// datasetReadingsPath and datasetEventsPath point at the real repository dataset,
+// so the ordering and statistical-evidence assertions run over the same data the
+// product ships rather than a synthetic fixture.
+func datasetReadingsPath() string { return filepath.Join("..", "..", "data", "readings.csv") }
+func datasetEventsPath() string   { return filepath.Join("..", "..", "data", "events.csv") }
+
+// newDatasetEnvironment builds an orchestrator over the real dataset and
+// returns the router-backed test server plus the orchestrator.
+func newDatasetEnvironment(t *testing.T) (*httptest.Server, *analysis.Orchestrator) {
+	t.Helper()
+	orchestrator := analysis.NewOrchestrator(
+		csv.NewLoader(datasetReadingsPath(), datasetEventsPath()),
+		memory.NewReadingRepo(),
+		memory.NewEventRepo(),
+		analysis.NewQualityChecker(),
+		analysis.NewBaselineCalculator(),
+		analysis.NewAnomalyDetector(),
+		analysis.NewEventCorrelator(),
+		analysis.NewClassifier(),
+		analysis.NewScorer(),
+		analysis.NewMockLLM(),
+		analysis.NewEvidenceBuilder(),
+	)
+	if err := orchestrator.Run(); err != nil {
+		t.Fatalf("orchestrator run: %v", err)
+	}
+	server := httptest.NewServer(api.NewRouter(orchestrator))
+	t.Cleanup(server.Close)
+	return server, orchestrator
+}
+
+// anomalyBody mirrors the API anomaly DTO decoded by the tests. The statistical
+// fields (priority, baseline, the four per-signal changes, the correlated
+// events and the data-quality flag) are decoded alongside the original ones, so
+// the tests can prove the published evidence, not only its presence as a key.
 type anomalyBody struct {
 	ID                string  `json:"id"`
 	MeterID           string  `json:"meter_id"`
@@ -99,6 +153,31 @@ type anomalyBody struct {
 	Reason            string  `json:"reason"`
 	RecommendedAction string  `json:"recommended_action"`
 	Status            string  `json:"status"`
+	Priority          int     `json:"priority"`
+	Baseline          struct {
+		Mean            float64 `json:"mean"`
+		StdDev          float64 `json:"stddev"`
+		Count           int     `json:"count"`
+		VoltageMean     float64 `json:"voltage_mean"`
+		CurrentMean     float64 `json:"current_mean"`
+		PowerFactorMean float64 `json:"power_factor_mean"`
+	} `json:"baseline"`
+	ConsumptionChangePct float64 `json:"consumption_change_pct"`
+	VoltageChangePct     float64 `json:"voltage_change_pct"`
+	CurrentChangePct     float64 `json:"current_change_pct"`
+	PowerFactorChangePct float64 `json:"power_factor_change_pct"`
+	CorrelatedEvents     []struct {
+		ID          string `json:"id"`
+		Type        string `json:"type"`
+		Start       string `json:"start"`
+		End         string `json:"end"`
+		Description string `json:"description"`
+	} `json:"correlated_events"`
+	DataQuality struct {
+		Flagged bool   `json:"flagged"`
+		Reason  string `json:"reason"`
+	} `json:"data_quality"`
+	LLMAnalysis string `json:"llm_analysis"`
 }
 
 type readingBody struct {
@@ -324,8 +403,227 @@ func TestAnomaliesListAndDetail(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
 		t.Fatalf("decode detail: %v (body %s)", err, raw)
 	}
-	if detail != listed {
+	// The DTO now carries a slice (correlated_events), so it is no longer
+	// comparable with ==; compare the two bodies by value instead.
+	if !reflect.DeepEqual(detail, listed) {
 		t.Fatalf("detail does not match the list entry:\nlist   %+v\ndetail %+v", listed, detail)
+	}
+}
+
+// TestAnomaliesListOrderAndStatisticalEvidence runs the list and detail
+// endpoints over the real dataset and proves two contracts T26/T27
+// require: the list is ordered by the deterministic priority (1 = most urgent)
+// with a stable tie-break, and every element publishes the full statistical
+// evidence (priority, baseline, the four per-signal changes, the correlated
+// events and the data-quality flag). The detail endpoint must deep-equal its
+// list element field for field.
+func TestAnomaliesListOrderAndStatisticalEvidence(t *testing.T) {
+	server, _ := newDatasetEnvironment(t)
+
+	status, raw := getStatus(t, server.URL+"/api/anomalies")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/anomalies: expected 200, got %d (body %s)", status, raw)
+	}
+	t.Logf("GET /api/anomalies (repo dataset) -> %d %s", status, strings.TrimSpace(raw))
+
+	var list []anomalyBody
+	if err := json.Unmarshal([]byte(raw), &list); err != nil {
+		t.Fatalf("decode list: %v (body %s)", err, raw)
+	}
+
+	// The deterministic priority order: M-109 (1) before M-112 (2) before
+	// M-104 (3) before M-106 (4).
+	wantOrder := []struct {
+		meter    string
+		priority int
+	}{
+		{meter: "M-109", priority: 1},
+		{meter: "M-112", priority: 2},
+		{meter: "M-104", priority: 3},
+		{meter: "M-106", priority: 4},
+	}
+	if len(list) != len(wantOrder) {
+		t.Fatalf("expected %d anomalies, got %d (body %s)", len(wantOrder), len(list), raw)
+	}
+	for i, want := range wantOrder {
+		got := list[i]
+		if got.MeterID != want.meter {
+			t.Errorf("list[%d]: expected meter %s, got %s", i, want.meter, got.MeterID)
+		}
+		if got.Priority != want.priority {
+			t.Errorf("list[%d] (%s): expected priority %d, got %d", i, want.meter, want.priority, got.Priority)
+		}
+		if i > 0 && list[i-1].Priority > got.Priority {
+			t.Errorf("list is not ordered by priority ascending: %d before %d", list[i-1].Priority, got.Priority)
+		}
+	}
+
+	// Every element must expose the statistical-evidence keys, and
+	// correlated_events must always be a JSON array (never null).
+	var rawList []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &rawList); err != nil {
+		t.Fatalf("decode raw list: %v (body %s)", err, raw)
+	}
+	requiredTop := []string{
+		"priority", "baseline",
+		"consumption_change_pct", "voltage_change_pct", "current_change_pct", "power_factor_change_pct",
+		"correlated_events", "data_quality",
+	}
+	requiredBaseline := []string{"mean", "stddev", "count", "voltage_mean", "current_mean", "power_factor_mean"}
+	for _, elem := range rawList {
+		var meter string
+		if err := json.Unmarshal(elem["meter_id"], &meter); err != nil {
+			t.Fatalf("decode meter_id from raw element: %v", err)
+		}
+		for _, key := range requiredTop {
+			if _, ok := elem[key]; !ok {
+				t.Errorf("meter %s: missing JSON field %q", meter, key)
+			}
+		}
+		if string(elem["correlated_events"]) == "null" {
+			t.Errorf("meter %s: correlated_events must be an array, got null", meter)
+		}
+		var baseline map[string]json.RawMessage
+		if err := json.Unmarshal(elem["baseline"], &baseline); err != nil {
+			t.Errorf("meter %s: decode baseline: %v", meter, err)
+			continue
+		}
+		for _, key := range requiredBaseline {
+			if _, ok := baseline[key]; !ok {
+				t.Errorf("meter %s: missing baseline field %q", meter, key)
+			}
+		}
+	}
+
+	byMeter := make(map[string]anomalyBody, len(list))
+	for _, a := range list {
+		byMeter[a.MeterID] = a
+	}
+	for meter, a := range byMeter {
+		if a.Baseline.Mean <= 0 || a.Baseline.Count <= 0 {
+			t.Errorf("meter %s: baseline must carry the real statistics, got %+v", meter, a.Baseline)
+		}
+		if a.Baseline.VoltageMean <= 0 || a.Baseline.CurrentMean <= 0 || a.Baseline.PowerFactorMean <= 0 {
+			t.Errorf("meter %s: electrical baseline means must be populated, got %+v", meter, a.Baseline)
+		}
+	}
+	if got := byMeter["M-109"].ConsumptionChangePct; got <= 0 {
+		t.Errorf("M-109 is a consumption spike: expected consumption_change_pct > 0, got %v", got)
+	}
+
+	// Correlated events: a real event explains M-104 and M-106, while M-109 is a
+	// real anomaly with no explaining event and must publish an empty array.
+	for _, meter := range []string{"M-104", "M-106"} {
+		if len(byMeter[meter].CorrelatedEvents) == 0 {
+			t.Errorf("meter %s is explained by an operational event: expected non-empty correlated_events", meter)
+		}
+	}
+	if events := byMeter["M-109"].CorrelatedEvents; len(events) != 0 {
+		t.Errorf("M-109 has no explaining event: expected empty correlated_events, got %+v", events)
+	}
+
+	// data_quality.flagged is true only for the DATA_QUALITY anomaly (M-112).
+	for meter, a := range byMeter {
+		wantFlagged := meter == "M-112"
+		if a.DataQuality.Flagged != wantFlagged {
+			t.Errorf("meter %s: data_quality.flagged = %v, want %v", meter, a.DataQuality.Flagged, wantFlagged)
+		}
+		if wantFlagged && a.DataQuality.Reason == "" {
+			t.Errorf("meter %s: a flagged data-quality anomaly must carry a reason", meter)
+		}
+	}
+
+	// The detail endpoint must publish exactly the same body as its list
+	// element, field for field.
+	for _, listed := range list {
+		detailStatus, detailRaw := getStatus(t, server.URL+"/api/anomalies/"+listed.ID)
+		if detailStatus != http.StatusOK {
+			t.Fatalf("GET /api/anomalies/%s: expected 200, got %d (body %s)", listed.ID, detailStatus, detailRaw)
+		}
+		var detail anomalyBody
+		if err := json.Unmarshal([]byte(detailRaw), &detail); err != nil {
+			t.Fatalf("decode detail %s: %v (body %s)", listed.ID, err, detailRaw)
+		}
+		if !reflect.DeepEqual(detail, listed) {
+			t.Errorf("detail for %s does not match its list element:\nlist   %+v\ndetail %+v", listed.ID, listed, detail)
+		}
+	}
+}
+
+// TestAnomaliesExposeLLMAnalysisAlongsideDeterministicFields proves the HTTP
+// contract exposes the LLM narrative as an ADDITIONAL field: llm_analysis
+// carries models.Evidence.LLMText while reason keeps carrying the deterministic
+// explanation, so the two never collapse into one and the deterministic values
+// stay authoritative.
+func TestAnomaliesExposeLLMAnalysisAlongsideDeterministicFields(t *testing.T) {
+	server, orchestrator := newTestEnvironment(t)
+
+	evidence := orchestrator.Evidence()
+	if len(evidence) != 1 {
+		t.Fatalf("expected 1 evidence record, got %d", len(evidence))
+	}
+	wantLLM := evidence[0].LLMText
+	if wantLLM == "" {
+		t.Fatal("mock LLM must populate LLMText for this test to be meaningful")
+	}
+
+	status, raw := getStatus(t, server.URL+"/api/anomalies")
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body %s)", status, raw)
+	}
+	t.Logf("GET /api/anomalies (LLM configured) -> %d %s", status, strings.TrimSpace(raw))
+	if !strings.Contains(raw, `"llm_analysis"`) {
+		t.Fatalf("expected the serialized anomaly to contain llm_analysis, got %s", raw)
+	}
+
+	var list []anomalyBody
+	if err := json.Unmarshal([]byte(raw), &list); err != nil {
+		t.Fatalf("decode list: %v (body %s)", err, raw)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 anomaly, got %d", len(list))
+	}
+	got := list[0]
+
+	if got.LLMAnalysis != wantLLM {
+		t.Fatalf("llm_analysis must carry models.Evidence.LLMText: got %q want %q", got.LLMAnalysis, wantLLM)
+	}
+	if got.Reason != evidence[0].Explanation {
+		t.Fatalf("reason must keep the deterministic explanation: got %q want %q", got.Reason, evidence[0].Explanation)
+	}
+	if got.RecommendedAction != evidence[0].Recommendation {
+		t.Fatalf("recommended_action must keep the deterministic recommendation: got %q want %q", got.RecommendedAction, evidence[0].Recommendation)
+	}
+	if got.LLMAnalysis == got.Reason {
+		t.Fatalf("llm_analysis and reason must be different fields with different content, both were %q", got.Reason)
+	}
+}
+
+// TestAnomaliesOmitLLMAnalysisWhenLLMUnavailable proves the omitempty contract
+// end to end: when the provider call fails, LLMText stays empty and the key is
+// absent from the JSON, while the deterministic reason remains present.
+func TestAnomaliesOmitLLMAnalysisWhenLLMUnavailable(t *testing.T) {
+	server, orchestrator := newTestEnvironmentWithLLM(t, failingLLM{})
+
+	for _, ev := range orchestrator.Evidence() {
+		if ev.LLMText != "" {
+			t.Fatalf("expected empty LLMText when the LLM call fails, got %q", ev.LLMText)
+		}
+		if ev.Explanation == "" {
+			t.Fatalf("deterministic explanation must stay populated, got %+v", ev)
+		}
+	}
+
+	status, raw := getStatus(t, server.URL+"/api/anomalies")
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body %s)", status, raw)
+	}
+	t.Logf("GET /api/anomalies (LLM unavailable) -> %d %s", status, strings.TrimSpace(raw))
+	if strings.Contains(raw, "llm_analysis") {
+		t.Fatalf("llm_analysis must be absent when LLMText is empty, got %s", raw)
+	}
+	if !strings.Contains(raw, `"reason"`) {
+		t.Fatalf("deterministic reason must remain present, got %s", raw)
 	}
 }
 
