@@ -1,7 +1,7 @@
-# Cumplimiento de `assets/Requerimientos.md` — Plan de tareas
+# Cumplimiento de `docs/requerimientos.md` — Plan de tareas
 
-**Fuente autoritativa:** `assets/Requerimientos.md` (prueba técnica AI Energy Management Platform).
-**Documentos secundarios:** `docs/endpoints.md`, `docs/routing.md`, `assets/backend_implementation_plan.md`, `assets/readings.csv`, `assets/events.csv`.
+**Fuente autoritativa:** `docs/requerimientos.md` (prueba técnica AI Energy Management Platform).
+**Documentos secundarios:** `docs/endpoints.md`, `docs/routing.md`, `docs/backend-implementation-plan.md`, `data/readings.csv`, `data/events.csv`.
 **Estado:** auditoría completada (solo lectura). Implementación pendiente de autorización.
 **Evidencia base:** `internal/analysis/evidenceBuilder.go:11`, `internal/analysis/orchestrator.go` (clasificación descartada), `internal/analysis/scorer.go`, `internal/analysis/quality.go:27`, `internal/analysis/classifier.go`, `internal/domain/models/reading.go`, `internal/api/handlers/ai.go`, `internal/api/*_test.go`, `docs/routing.md`.
 
@@ -88,7 +88,7 @@
 ## Verificación
 
 - `go test ./...` en verde y cobertura global ≥ 80%.
-- Los 4 casos del dataset se comportan como indica la tabla del §4 de `assets/Requerimientos.md`.
+- Los 4 casos del dataset se comportan como indica la tabla del §4 de `docs/requerimientos.md`.
 - Cada tarea cierra con un commit work-unit (Conventional Commit) en la rama de la feature, con tests y docs junto al comportamiento.
 
 > Nota: este documento es de planificación. La implementación no se inicia hasta autorización explícita del usuario.

@@ -1,6 +1,6 @@
 ## Requerimientos MVP vs Implementación Actual
 
-- **Objetivo:** Verificar que el backend cumple con todos los requisitos del documento `assets/Requerimientos.md` y crear tareas para cubrir cualquier brecha.
+- **Objetivo:** Verificar que el backend cumple con todos los requisitos del documento `docs/requerimientos.md` y crear tareas para cubrir cualquier brecha.
 
 ### Brechas identificadas
 1. **Importes no usados – chi**
