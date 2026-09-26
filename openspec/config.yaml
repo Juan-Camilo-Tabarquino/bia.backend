@@ -1,0 +1,58 @@
+strict_tdd: true
+context: |
+  bia.backend is a Go project.
+  Detected markers: go.mod.
+  Additional evidence: Test-like files detected (5); examples: internal\domain\services\components_test.go, internal\domain\services\detection_test.go, internal\domain\services\loader_test.go, internal\domain\services\orchestrator_test.go, internal\domain\services\quality_test.go.
+  Primary test command: go test ./....
+  Unit tests: go test (go test ./...).
+  Integration tests: Go integration tests where present (go test ./...).
+  E2E tests: none.
+rules:
+  proposal:
+    require_problem_statement: true
+  spec:
+    require_acceptance_criteria: true
+  design:
+    require_tradeoffs: true
+  tasks:
+    protect_review_workload: true
+  apply:
+    test_command: "go test ./..."
+  verify:
+    test_command: "go test ./..."
+testing:
+  detected: "2026-09-24"
+  runner:
+    command: "go test ./..."
+    framework: "go test"
+  layers:
+    unit: "go test"
+    integration: "Go integration tests where present"
+    e2e: ""
+  commands:
+    unit:
+      - scope: "."
+        command: "go test ./..."
+        framework: "go test"
+    integration:
+      - scope: "."
+        command: "go test ./..."
+        framework: "Go integration tests where present"
+    e2e:
+      []
+  coverage:
+    command: "go test -cover ./..."
+    commands:
+      - scope: "."
+        command: "go test -cover ./..."
+        framework: "go coverage"
+quality:
+  lint: ""
+  lint_commands:
+    []
+  typecheck: ""
+  typecheck_commands:
+    []
+  format: ""
+  format_commands:
+    []

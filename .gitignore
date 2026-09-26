@@ -30,3 +30,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+# Local Pi runtime state
+.atl/
+.pi/
+
+# CodeGraph local index
+.codegraph/

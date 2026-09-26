@@ -1,0 +1,7 @@
+# create-backend-sdd-spec
+
+## Tasks
+
+- [ ] Draft OpenSpec specification for backend implementation (backend_implementation.sdd.yaml).
+- [ ] Create ODD task file and mirror for tracking.
+- [ ] Ensure spec is referenced in documentation and build pipeline.
