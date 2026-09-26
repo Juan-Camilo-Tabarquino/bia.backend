@@ -101,9 +101,9 @@ func TestLoadEventsMissingColumns(t *testing.T) {
 func TestLoadReadingsRealDataset(t *testing.T) {
     // `go test` runs with the package directory as the working directory, so the
     // repository asset is reached three levels up from internal/data/csv.
-    loader := NewLoader("../../../assets/readings.csv", "")
+    loader := NewLoader("../../../data/readings.csv", "")
     readings, err := loader.LoadReadings()
-    if err != nil { t.Fatalf("unexpected error loading assets/readings.csv: %v", err) }
+    if err != nil { t.Fatalf("unexpected error loading data/readings.csv: %v", err) }
     if len(readings) != 4032 {
         t.Fatalf("expected 4032 readings, got %d", len(readings))
     }
@@ -129,7 +129,7 @@ func TestLoadReadingsRealDataset(t *testing.T) {
         }
     }
     if !found {
-        t.Fatalf("expected to find meter M-101 in assets/readings.csv")
+        t.Fatalf("expected to find meter M-101 in data/readings.csv")
     }
 }
 

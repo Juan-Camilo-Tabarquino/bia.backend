@@ -20,7 +20,7 @@ import (
 )
 
 // The hermetic dataset below is generated at runtime, so every test is
-// independent from the real assets/ dataset and fully deterministic.
+// independent from the real data/ dataset and fully deterministic.
 const (
 	stableMeter = "T-1"
 	otherMeter  = "T-2"

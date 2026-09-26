@@ -137,10 +137,10 @@ func TestLoad_DefaultsWhenNoYAMLAndNoEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() returned unexpected error: %v", err)
 	}
-	if got, want := cfg.ReadingsCSV, "assets/readings.csv"; got != want {
+	if got, want := cfg.ReadingsCSV, "data/readings.csv"; got != want {
 		t.Errorf("ReadingsCSV = %q, want default %q", got, want)
 	}
-	if got, want := cfg.EventsCSV, "assets/events.csv"; got != want {
+	if got, want := cfg.EventsCSV, "data/events.csv"; got != want {
 		t.Errorf("EventsCSV = %q, want default %q", got, want)
 	}
 }

@@ -9,15 +9,15 @@ import (
 	"github.com/neuralium/ai-energy/internal/domain/models"
 )
 
-// TestRequirementsDatasetOutcomes runs the real pipeline over the assets CSV
+// TestRequirementsDatasetOutcomes runs the real pipeline over the data/ CSV
 // files and asserts the four outcomes the specification requires for the
 // critical meters, plus the general contract that evidence is produced and
 // every record is fully populated.
 func TestRequirementsDatasetOutcomes(t *testing.T) {
 	// The package lives at <root>/internal/analysis, so the repository root is
 	// two levels up from the test's working directory.
-	readingsPath := filepath.Join("..", "..", "assets", "readings.csv")
-	eventsPath := filepath.Join("..", "..", "assets", "events.csv")
+	readingsPath := filepath.Join("..", "..", "data", "readings.csv")
+	eventsPath := filepath.Join("..", "..", "data", "events.csv")
 
 	orchestrator := NewOrchestrator(
 		csv.NewLoader(readingsPath, eventsPath),

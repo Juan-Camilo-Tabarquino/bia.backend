@@ -32,7 +32,7 @@ type simpleCorrelator struct{}
 func NewEventCorrelator() Correlator { return &simpleCorrelator{} }
 
 func (c *simpleCorrelator) Correlate(candidates []models.AnomalyCandidate, events []models.Event) []models.EventCorrelation {
-	// Events loaded from the simplified assets schema carry the meter id in
+	// Events loaded from the simplified CSV schema carry the meter id in
 	// their ID field. When an event ID identifies one of the known meters it is
 	// scoped to that meter only; otherwise it falls back to time-window matching.
 	knownMeters := make(map[string]bool, len(candidates))

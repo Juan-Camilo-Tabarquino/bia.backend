@@ -7,8 +7,8 @@ import (	"github.com/spf13/viper"
 // Values can be provided via config.yaml or overridden by environment variables.
 //
 //   SERVER_PORT   -> HTTP listening port (default 8080)
-//   READINGS_CSV  -> path to the readings CSV (env var READINGS_CSV, default assets/readings.csv)
-//   EVENTS_CSV    -> path to the events CSV (env var EVENTS_CSV, default assets/events.csv)
+//   READINGS_CSV  -> path to the readings CSV (env var READINGS_CSV, default data/readings.csv)
+//   EVENTS_CSV    -> path to the events CSV (env var EVENTS_CSV, default data/events.csv)
 //   LLM_API_KEY   -> API key for the LLM provider (env var LLM_API_KEY). Optional:
 //                    when unset/empty the deterministic mock provider is used.
 //
@@ -41,8 +41,8 @@ func Load() (*Config, error) {
 
     // Defaults (can be overridden by config file or env vars)
     v.SetDefault("server.port", 3001)
-    v.SetDefault("data.readings_csv", "assets/readings.csv")
-    v.SetDefault("data.events_csv", "assets/events.csv")
+    v.SetDefault("data.readings_csv", "data/readings.csv")
+    v.SetDefault("data.events_csv", "data/events.csv")
     v.SetDefault("llm.api_key", "")
 
     // Bind environment variables (env vars take precedence)
@@ -59,10 +59,10 @@ func Load() (*Config, error) {
 
     // Ensure defaults for CSV paths if empty after env loading
     if cfg.ReadingsCSV == "" {
-        cfg.ReadingsCSV = "assets/readings.csv"
+        cfg.ReadingsCSV = "data/readings.csv"
     }
     if cfg.EventsCSV == "" {
-        cfg.EventsCSV = "assets/events.csv"
+        cfg.EventsCSV = "data/events.csv"
     }
     // No other validation; errors are only returned if Viper fails to read the config file
 

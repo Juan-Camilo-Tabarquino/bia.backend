@@ -1,5 +1,5 @@
 server:
   port: 3001
 data:
-  readings_csv: "assets/readings.csv"
-  events_csv: "assets/events.csv"
+  readings_csv: "data/readings.csv"
+  events_csv: "data/events.csv"

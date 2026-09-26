@@ -12,7 +12,7 @@ import (
 )
 
 // Loader reads readings and events from CSV files.
-// The CSV format matches the sample files in assets/.
+// The CSV format matches the sample files in data/.
 // The struct holds absolute or relative file paths.
 
 type Loader struct {
@@ -136,7 +136,7 @@ func (l *Loader) LoadEvents() ([]models.Event, error) {
         return nil, err
     }
     var out []models.Event
-    // Flexible header handling – accept both the original schema and the simplified one used in assets.
+    // Flexible header handling – accept both the original schema and the simplified one used in data.
     header := recs[0]
     rawIdx := make(map[string]int)
     for idx, name := range header {

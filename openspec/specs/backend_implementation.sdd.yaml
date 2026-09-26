@@ -58,7 +58,7 @@ internal/api/routes/      → chi router wiring
 - `GET /anomalies/{meter_id}` – detailed evidence for a single meter.
 
 ## testing strategy
-- Unit tests for each pipeline stage using the four benchmark meters (M‑104, M‑106, M‑109, M‑112) present in `assets/readings.csv` and `assets/events.csv`.
+- Unit tests for each pipeline stage using the four benchmark meters (M‑104, M‑106, M‑109, M‑112) present in `data/readings.csv` and `data/events.csv`.
 - Integration test exercising the full orchestrator and confirming expected classifications and severity scores.
 - Mock LLM client ensures deterministic test runs.
 
