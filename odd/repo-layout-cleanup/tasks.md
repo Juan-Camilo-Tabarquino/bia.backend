@@ -155,9 +155,54 @@ Orden viable, cada commit verde:
    `requirements_dataset_test.go`, el comentario de `api_test.go`, `openspec`, docs de ODD).
 3. **Integración LLM** — todo el resto, incluidos los archivos nuevos que ya dicen `data/`.
 
-Los commits 2 y 3 se solapan en archivos (`config.yaml`, `config.go`, `config_test.go`, `api_test.go`,
-`requirements_dataset_test.go`), así que el 2 requiere `git add -p` para separar hunks. Riesgo conocido: en
-`internal/api/api_test.go` la separación no es limpia porque las líneas con paths son código nuevo.
+---
+
+## Commits ejecutados (evidencia)
+
+| # | SHA | Mensaje | Diff |
+|---|---|---|---|
+| 1 | `fc3fd37` | `chore(odd): consolidate task docs into odd/<feature>/tasks.md` | 10 archivos, +208/-19 |
+| 2 | `403b32f` | `chore(repo): rename assets/ to data/ and move planning docs into docs/` | 13 archivos, +21/-21 |
+| 3 | `a9067ac` | `feat(ai): narrate anomalies with the real Ollama provider` | 18 archivos, +1396/-322 |
+
+Base: `11c9508`. Rama: `split-commits`.
+
+### Verificación de integridad
+El árbol final y el snapshot previo a la división tienen el **mismo tree hash** (`f72bc947535758b68115fa81e2224723ec3f08fd`):
+la división no perdió ni alteró un solo byte. `go build`, `go vet` y `go test -count=1 ./...` verdes sobre el
+tree committeado.
+
+### Verificación del commit 2 en aislamiento
+Se creó un `git worktree` temporal en el SHA del commit 2 (sin tocar el árbol principal) y allí
+`go build`/`go vet`/`go test -count=1 ./...` dieron verde, con los CSV ya resueltos desde `data/`. Es la prueba
+de que el commit 2 es autoconsistente y no depende del trabajo LLM.
+
+---
+
+## Desviación encontrada al ejecutar (no prevista en el plan)
+
+El plan original del writer decía "requiere `git add -p` para separar hunks". Al ejecutar apareció que
+**eso era imposible**: `internal/config/config.go` en HEAD está indentado con espacios y con el bloque `import`
+malformado, y el trabajo LLM le aplicó un `gofmt` de archivo completo. Con un reformateo total, todo el archivo
+es un solo hunk: no hay hunks que separar.
+
+Solución aplicada, uniforme para los 5 archivos solapados (`config.yaml`, `config.go`, `config_test.go`,
+`requirements_dataset_test.go`, `api_test.go`):
+
+    git show <base>:<archivo> | sed -e 's|"assets"|"data"|g' -e 's|assets/|data/|g'
+
+Es decir, la versión del commit 2 se **reconstruye** desde la base aplicando sólo la sustitución de paths, en vez
+de recortar hunks. Ventaja: el commit 2 quedó en +21/-21 líneas, todas sustituciones, sin reformateo — mucho más
+revisible de lo que habría sido un corte por hunks. El `gofmt` viaja en el commit 3, que es de donde vino.
+
+Trampa del primer intento, para no repetirla: el `sed` de `assets/` no matchea `filepath.Join("..", "..", "assets", ...)`
+porque ahí el token es `"assets"` sin barra. Hay que sustituir las dos formas.
+
+### Red de seguridad usada
+Antes de tocar el índice se creó la rama `wip-checkpoint` con el árbol completo. Durante la ejecución un
+`git reset --hard` mal compuesto borró el árbol de trabajo y la recuperación desde esa rama fue inmediata y sin
+pérdida. La rama sigue existiendo como red; se puede borrar con
+`git branch -D wip-checkpoint` una vez conforme con los 3 commits.
 
 ---
 
