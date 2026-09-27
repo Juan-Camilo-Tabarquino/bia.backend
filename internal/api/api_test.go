@@ -333,8 +333,9 @@ func TestMeterDetailUnknownReturnsNotFound(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown meter, got %d", status)
 	}
-	if !strings.Contains(body, "error") {
-		t.Fatalf("expected a JSON error body, got %s", body)
+	const want = `{"error":"medidor UNKNOWN no encontrado"}`
+	if got := strings.TrimSpace(body); got != want {
+		t.Fatalf("expected error body %s, got %s", want, got)
 	}
 }
 
@@ -634,8 +635,9 @@ func TestAnomalyDetailUnknownReturnsNotFound(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown anomaly id, got %d", status)
 	}
-	if !strings.Contains(body, "error") {
-		t.Fatalf("expected a JSON error body, got %s", body)
+	const want = `{"error":"anomalía does-not-exist no encontrada"}`
+	if got := strings.TrimSpace(body); got != want {
+		t.Fatalf("expected error body %s, got %s", want, got)
 	}
 }
 
@@ -678,8 +680,9 @@ func TestAnalysisUnknownReturnsNotFound(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown analysis id, got %d", status)
 	}
-	if !strings.Contains(body, "error") {
-		t.Fatalf("expected a JSON error body, got %s", body)
+	const want = `{"error":"análisis unknown-analysis-id no encontrado"}`
+	if got := strings.TrimSpace(body); got != want {
+		t.Fatalf("expected error body %s, got %s", want, got)
 	}
 }
 

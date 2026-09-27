@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,5 +74,35 @@ func TestAnomalyIDIsSharedAndDeterministic(t *testing.T) {
 	}
 	if list[0].Type != "REAL_ANOMALY" || list[0].Severity != "HIGH" || list[0].Confidence != 0.97 {
 		t.Fatalf("DTO did not carry the real values: %+v", list[0])
+	}
+}
+
+// TestNotFoundErrorBodiesAreSpanish pins the user-visible 404 body of every
+// handler branch that rejects a request path before it can parse an id. The
+// frontend renders error.message via getErrorMessage, so these strings are
+// user-facing copy rather than developer-only text.
+func TestNotFoundErrorBodiesAreSpanish(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		target  string
+		want    string
+	}{
+		{"analysis", AnalysisGET, "/wrong", `{"error":"análisis no encontrado"}`},
+		{"meter", MeterDetail(nil), "/wrong", `{"error":"medidor no encontrado"}`},
+		{"anomaly", AnomalyDetailByID(nil), "/wrong", `{"error":"anomalía no encontrada"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", tc.target, nil)
+			tc.handler(rr, req)
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d", rr.Code)
+			}
+			if got := strings.TrimSpace(rr.Body.String()); got != tc.want {
+				t.Fatalf("expected error body %s, got %s", tc.want, got)
+			}
+		})
 	}
 }
