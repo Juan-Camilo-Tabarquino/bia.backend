@@ -97,8 +97,8 @@ Source: `internal/api/router.go:106-109`.
       "Anomaly": { "MeterID": "T-1", "Timestamp": "2026-09-01T12:00:00Z", "Delta": 0.5, "Kind": "CONSUMPTION_SPIKE", "Raw": { "MeterID": "T-1", "Timestamp": "2026-09-01T12:00:00Z", "Consumption": 1.2, "Voltage": 230, "Current": 5, "PowerFactor": 0.95, "Status": "OK" } },
       "Correlation": { "Anomaly": { "...": "same shape" }, "Events": [ { "ID": "e1", "Type": "MAINTENANCE", "Start": "...", "End": "...", "Description": "..." } ], "Explains": false },
       "Priority": 1,
-      "explanation": "consumption spike of +50% vs baseline",
-      "recommendation": "inspect the installation",
+      "explanation": "El consumo del medidor T-1 está 50.0% por encima de su línea base sin ningún evento operativo conocido.",
+      "recommendation": "Revisar el medidor y su instalación.",
       "llm_text": "",
       "type": "REAL_ANOMALY",
       "severity": "HIGH",
@@ -164,7 +164,7 @@ Source: `internal/api/handlers/endpoints.go:22-30` (`AllMeterIDs` returns
   `"OK"` (trimmed, case-insensitive); otherwise `"DEGRADED"`.
 - `name` and `location` are always empty strings: the project has no data source
   for them, so no values are invented.
-- Unknown meter: `404 Not Found` with `{"error":"meter <meterId> not found"}`.
+- Unknown meter: `404 Not Found` with `{"error":"medidor <meterId> no encontrado"}`.
 
 Source: `internal/api/handlers/ai.go:32-41, 105-147`.
 
@@ -214,10 +214,10 @@ Source: `internal/api/router.go:43-76`, `internal/domain/models/reading.go:9-18`
     "type": "REAL_ANOMALY",
     "severity": "HIGH",
     "confidence": 0.9,
-    "reason": "consumption spike of +50% vs baseline",
-    "recommended_action": "inspect the installation",
+    "reason": "El consumo del medidor T-1 está 50.0% por encima de su línea base sin ningún evento operativo conocido.",
+    "recommended_action": "Revisar el medidor y su instalación.",
     "status": "unexplained",
-    "llm_analysis": "Deterministic review of meter T-1: consumption is 150.0% above baseline..."
+    "llm_analysis": "Revisión determinista del medidor T-1: el consumo está 50.0% por encima de su línea base sin ningún evento operativo; las firmas eléctricas respaldan una anomalía real (confianza 0.90)."
   }
 ]
 ```
@@ -236,7 +236,7 @@ Source: `internal/api/handlers/endpoints.go:67-77, 90-118, 135-141`.
   `GET /api/anomalies`, so the list and the detail agree.
 - Request body: none.
 - `200 OK` with a single anomaly object (same shape as a list element).
-- Unknown id: `404 Not Found` with `{"error":"anomaly <id> not found"}`.
+- Unknown id: `404 Not Found` with `{"error":"anomalía <id> no encontrada"}`.
 
 Source: `internal/api/handlers/ai.go:149-172`, `internal/api/handlers/endpoints.go:83-85, 90-111`.
 
@@ -289,7 +289,7 @@ Source: `internal/api/handlers/ai.go:44-56`.
 The `anomalies` elements are the same anomaly object shape as `GET /api/anomalies`
 (`[]` when the run produced none).
 
-- Unknown id: `404 Not Found` with `{"error":"analysis <id> not found"}`.
+- Unknown id: `404 Not Found` with `{"error":"análisis <id> no encontrado"}`.
 - The store is an in-memory map in the process: ids are valid only for the
   lifetime of the running process, and are lost on restart.
 
