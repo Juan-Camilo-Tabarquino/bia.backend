@@ -36,6 +36,40 @@ does not reject other methods.
 All successful responses are JSON with `Content-Type: application/json`. Error
 bodies from the handlers are always JSON: `{"error":"<message>"}`.
 
+## Startup warm-up and the LLM narrative window
+
+The server runs the deterministic pipeline synchronously at startup and begins
+serving roughly one second after launch. The LLM narrative enrichment then runs
+in the background and takes about a minute on the shipped dataset with the real
+provider.
+
+- During that warm-up window, the `llm_analysis` field of an anomaly (and the
+  corresponding `llm_text` field of an evidence item in `GET /api/reports`) may
+  be the empty string. Because the field is `omitempty`, an empty narrative is
+  omitted from the JSON entirely, so the key may be absent rather than present
+  as `""`.
+- **Every other field is already complete and correct** from the first request:
+  `type`, `severity`, `confidence`, `reason`, `recommended_action`, `status`,
+  `priority`, the per-meter baseline, the change percentages, the correlated
+  events and the data-quality verdict all come from the deterministic pipeline
+  and are final at that point.
+- The narratives fill in progressively and are available from the same endpoint
+  on a later request with no client action required. No polling protocol, no
+  status field and no `503` state is introduced.
+- `GET /api/health` is unaffected and keeps answering `200 {"status":"ok"}`
+  immediately, from the first moment.
+- The warm-up window applies to every endpoint that returns evidence:
+  `GET /api/anomalies`, `GET /api/anomalies/{id}`, `GET /api/reports`,
+  `GET /api/ai/analysis/{id}` and `GET /api/dashboard/summary`.
+- `POST /api/ai/analyze` is the one path that is **not** affected: it re-runs the
+  deterministic stage and the enrichment in the same request, so it returns with
+  the narratives already populated. This takes about a minute by design, and the
+  frontend discloses that latency to the user.
+
+Source: `cmd/api/main.go` (runs the deterministic stage synchronously, then the
+enrichment in a background goroutine), `internal/analysis/orchestrator.go`
+(`Detect`, `Enrich`).
+
 ---
 
 ## GET /api/health

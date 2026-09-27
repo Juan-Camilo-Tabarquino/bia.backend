@@ -80,7 +80,14 @@ Running authored-line count:
 
 | Work unit | Authored lines | Cumulative |
 | --- | --- | --- |
+| Work unit | Authored lines | Cumulative |
+| --- | --- | --- |
 | WU1 | 407 | 407 |
+| WU2 | 0 (cancelled after investigation) | 407 |
+| WU3 (docs) | 34 | 441 |
+
+The scope shrank materially when WU2 was cancelled, so the `single-pr` decision
+still stands and no chain is needed. Do not ask again for this feature.
 
 ## Route declaration
 
@@ -127,13 +134,49 @@ One writer thread only. No parallel writers in this worktree.
       goroutine with start/finish logging, and no longer delays
       `ListenAndServe`. `Enrich()` carries an English comment stating the lock
       must not be collapsed back over the LLM loop.
-- [ ] **WU2 — `POST /api/ai/analyze` must not block.** The handler currently
-      calls `Run()` and would hold the request for ~68 s. Make it publish the
-      deterministic snapshot and return immediately, with enrichment continuing
-      in the background. Commit.
-- [ ] **WU3 — Document the warm-up contract.** In `docs/endpoints.md`, state
-      that `llm_analysis` may be `""` for a period after startup while the rest
-      of the anomaly payload is already complete and correct. Commit.
+- [ ] **WU2 — CANCELLED after investigation (no code written).** The original
+      intent was to make `POST /api/ai/analyze` non-blocking. Evidence collected
+      from the frontend repository `bia.frontend` shows that the synchronous
+      contract is a **deliberate, documented UX decision**, not an accident:
+
+      - `src/components/anomalies/AiReanalysis.tsx:33-42` states that the POST
+        "is synchronous: in a single request it re-runs the deterministic
+        pipeline and then the LLM narrative, so it can legitimately stay pending
+        for about a minute" and that `GET /api/ai/analysis/{id}` "always answers
+        `"status":"completed"`, so there is no pending state to poll".
+      - The same component renders an explicit latency disclosure to the user
+        (`LATENCY_HELPER`, "Puede tardar alrededor de un minuto") and a running
+        status message while the request is in flight.
+      - The component consumes `topAnomaly.llm_analysis` directly as the main
+        content of its result block, and it never polls.
+
+      Making the POST return early would therefore render "Análisis completado"
+      over an empty narrative — a worse defect than the one it would fix. The
+      decision (user, 2026-09-27) is to leave `POST /api/ai/analyze` synchronous.
+      If asynchrony is ever wanted, it is a coordinated two-repository change
+      (the frontend must poll `status: "queued"` → `"completed"`), not a backend
+      only change.
+
+      Residual risk accepted and recorded: a proxy or network timeout between
+      frontend and backend could cut a ~68 s request. Not observed locally.
+- [x] **WU3 — Document the warm-up contract.** DONE. Added a
+      "Startup warm-up and the LLM narrative window" section to
+      `docs/endpoints.md`, placed after the route summary and before the
+      per-endpoint reference so a reader sees it before any individual
+      endpoint. `docs/endpoints.md` +34/-0.
+
+      Parent verification: the worker's load-bearing claim was that
+      `llm_analysis` carries `omitempty`, which is what makes the "the key may
+      be absent rather than present as `''`" wording correct. Confirmed
+      independently at `internal/api/handlers/endpoints.go:71`:
+      ``LLMAnalysis string `json:"llm_analysis,omitempty"` ``. Parent spot
+      check re-ran `git status --porcelain` and `git diff --stat`: exactly the
+      two expected files, no third one.
+
+      Review authority: the documentation candidate was reviewed natively and
+      closed on its own at tier `low` with reason `non_executable_only`, no
+      lenses required (lineage `review-9682fa058ba5aa19`), then acknowledged
+      with `authority: burned`.
 - [ ] **WU4 — Closure verification.** `go test ./...`, `go test -race ./...`,
       and a live run measuring launch-to-listening (expect ~1 s, not 69 s) plus
       confirming `/api/anomalies` returns the 4 benchmark cases immediately.
@@ -149,10 +192,35 @@ One writer thread only. No parallel writers in this worktree.
 - Full suite green; the 4 benchmark assertions in
   `internal/analysis/requirements_dataset_test.go` still pass.
 
+## RDD candidate outcome (WU1, commit `c3e75de`)
+
+`gentle_review {"operation":"assess"}` over the committed range, with the branch
+point as `baseRef` and `committedOnly: true`, **failed**: `risk: "unassessable"`,
+reason `schema-incompatible`, `changedPaths: 0`, `changedLines: 0`,
+`candidate: null`. It was reproduced twice, the second time with the documented
+minimal input, so the optional `writerModelId` field is not the cause.
+
+Per the reviewed contract, a failed assessment is treated exactly like high
+risk: `writerSelfVerification: true` and `independentVerifier: true`. WU4 must
+therefore include a separate independent verifier run (`gentle-ai-verify`); the
+writer report alone is not the verification of record for this candidate.
+
+The failure is a known upstream defect tracked as
+`Gentleman-Programming/gentle-ai#4791` (open, no published fix on the 3.7.0
+stable pairing; a field-for-field identical occurrence is already recorded in
+that thread). The user authorized reporting it. The occurrence comment was
+prepared and passed its final privacy scan, but could not be published: the
+`POST` to the issue comments endpoint returned `HTTP 401 Requires
+authentication`, and this machine holds no write credential (no `gh` CLI, no
+token). A permission failure ends further GitHub mutation, with no blind retry
+and no substitute command, so consumer state was preserved and the work resumed
+under the documented fallback. The prepared comment is recoverable from Engram.
+
 ## Non-goals
 
 - No `503 warming` state, no new readiness endpoint.
-- No change to `GET /api/health`'s response contract.
+- No change to `POST /api/ai/analyze`: it stays synchronous by decision (see
+  WU2).
 - No fix of the wider documentation drift in this feature (`openspec/` still
   names chi and `/api/v1`, `docs/routing.md:35` has a stale `NewRouter`
   signature, `docs/endpoints.md` under-documents the anomaly DTO). Tracked as a
