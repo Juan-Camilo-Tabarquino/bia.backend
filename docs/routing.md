@@ -32,10 +32,10 @@ so handlers that own sub-paths parse the path variable themselves by trimming
 the leading `/api` and their own prefix from `r.URL.Path`.
 
 ```go
-func NewRouter(orchestrator *analysis.Orchestrator, port int) http.Handler {
+func NewRouter(orchestrator *analysis.Orchestrator) http.Handler {
     mux := http.NewServeMux()
 
-    mux.Handle("/api/health", corsWrapper(http.HandlerFunc(healthHandler)))
+    mux.Handle("/api/health", corsWrapper(http.HandlerFunc(handlers.Health)))
     mux.Handle("/api/reports", corsWrapper(reportsHandler(orchestrator)))
     mux.Handle("/api/meters", corsWrapper(handlers.Meters(orchestrator.ReadingRepo)))
     mux.Handle("/api/meters/", customMeters)                 // detail + readings subtree
@@ -73,7 +73,9 @@ See `docs/endpoints.md` for the parameters and JSON body of each route.
 ## Health check
 
 `GET /api/health` returns `200 OK` with the literal body `{"status":"ok"}`. It is
-a plain handler in `internal/api/router.go`; there is no heartbeat middleware.
+the `handlers.Health` function in `internal/api/handlers/endpoints.go`, wrapped by
+`corsWrapper` and registered in `internal/api/router.go`; there is no heartbeat
+middleware.
 
 ## Middleware
 

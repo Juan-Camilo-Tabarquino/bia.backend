@@ -107,29 +107,34 @@ recibe información que **contradice** el código que está mirando.
 - **Terminado significa:** el plan apunta al prefijo `/api` real, o marca
   claramente que `/api/v1` era la intención original y no se implementó.
 
-### B3 — `docs/routing.md:35` muestra una firma vieja
+### B3 — `docs/routing.md:35` muestra una firma vieja — **RESUELTO** (2026-09-27)
 
-- **Dónde:** `docs/routing.md:35`.
-- **Qué dice:** `func NewRouter(orchestrator *analysis.Orchestrator, port int) http.Handler`.
-- **La verdad:** `internal/api/router.go:33` es
-  `func NewRouter(orchestrator *analysis.Orchestrator) http.Handler`. **El
-  parámetro `port` ya no existe**; se eliminó en la limpieza de código muerto y
-  el doc no se actualizó.
-- **Terminado significa:** la firma del doc coincide con la del código.
+- **Commit:** `_pendiente_`.
+- **Hechos corregidos:** `internal/api/router.go:33` es
+  `func NewRouter(orchestrator *analysis.Orchestrator) http.Handler`: el
+  parámetro `port` no existe. Además, el health handler no vive en `router.go`
+  sino en `internal/api/handlers/endpoints.go:15-19` (`func Health`), y el bloque
+  de código de `NewRouter` citaba un símbolo `healthHandler` inexistente (el real
+  es `handlers.Health`).
+- **Qué cambió:** se corrigieron la firma citada, el handler de health dentro del
+  bloque y la sección "Health check". El resto de `docs/routing.md` (bloque de
+  `corsWrapper`, tabla de rutas y sección "Adding a new route") se auditó contra
+  el código y ya coincidía.
 
-### B4 — `docs/endpoints.md` sub-documenta el DTO de anomalía
+### B4 — `docs/endpoints.md` sub-documenta el DTO de anomalía — **RESUELTO** (2026-09-27)
 
-- **Dónde:** el ejemplo de `GET /api/anomalies` en `docs/endpoints.md`.
-- **Qué está mal:** muestra **10** campos y el código emite **18**. Faltan
-  exactamente: `priority`, `baseline`, los cuatro `*_change_pct`
-  (`consumption_`, `voltage_`, `current_`, `power_factor_`), `correlated_events`
-  y `data_quality`.
-- **Consecuencia real:** un frontend que se guíe por este doc va a ignorar los
-  campos que sí recibe, y el detalle de la anomalía queda peor de lo que podría.
-- **Además:** varias referencias `archivo:línea` del doc están corridas respecto
-  del código.
-- **Terminado significa:** el ejemplo lista los 18 campos con sus tipos, y las
-  referencias de línea resuelven.
+- **Commit:** `_pendiente_`.
+- **Hechos corregidos:** el ejemplo de `GET /api/anomalies` mostraba 10 campos y
+  el `AnomalyDTO` (`internal/api/handlers/endpoints.go:36-72`) emite 18. Los 8
+  faltantes son `priority` (int), `baseline` (objeto: `mean`, `stddev`, `count`,
+  `voltage_mean`, `current_mean`, `power_factor_mean`), los cuatro
+  `*_change_pct` (float64), `correlated_events` (array de objetos; siempre array,
+  nunca `null`) y `data_quality` (objeto: `flagged`, `reason`).
+- **Qué cambió:** el ejemplo lista los 18 campos con sus tipos y sub-claves, y se
+  recomputaron todas las referencias `Source:` del archivo contra el código actual
+  (health, reports, meters, meter-detail, readings, anomalies, anomaly-detail,
+  analyze, analysis-get y dashboard-summary), más la referencia de `corsWrapper`
+  y la de `models.Evidence`.
 
 ---
 

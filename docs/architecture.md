@@ -773,11 +773,6 @@ Se listan porque son reales y están verificadas, no por completitud formal.
 - **`docs/backend-implementation-plan.md` especifica `/api/v1/*`**, rutas que no
   existen y que el código rechaza a propósito. (Ojo: el token `/api/v1` aparece
   en este plan, **no** en `openspec/`.)
-- **`docs/routing.md` muestra una firma vieja** de `NewRouter` con un parámetro
-  `port` que ya no existe.
-- **`docs/endpoints.md` sub-documenta el DTO de anomalía**: el ejemplo muestra 10
-  campos y el código emite 18 (faltan `priority`, `baseline`, los cuatro
-  `*_change_pct`, `correlated_events` y `data_quality`).
 
 **En el arranque:**
 
