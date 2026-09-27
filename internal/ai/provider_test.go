@@ -260,8 +260,56 @@ func TestPromptRendersM109PayloadVerbatim(t *testing.T) {
 		t.Errorf("prompt does not embed the M-109 payload JSON")
 	}
 	const finalSentence = "No inventes datos que no estén presentes."
-	if !strings.HasSuffix(prompt, finalSentence) {
-		t.Errorf("prompt does not end with %q", finalSentence)
+	if !strings.Contains(prompt, finalSentence) {
+		t.Errorf("prompt does not contain %q", finalSentence)
+	}
+	const closingRule = "Responde únicamente en español."
+	if !strings.HasSuffix(prompt, closingRule) {
+		t.Errorf("prompt does not end with %q", closingRule)
+	}
+}
+
+// TestPromptCarriesExplicitSpanishLanguageInstruction pins the response-language
+// contract: the product prompt must tell the model to answer in Spanish rather
+// than relying on the model mirroring the Spanish wording by default. The test
+// also pins the pre-existing prompt lines, so the instruction can only be added
+// alongside them, never replace them.
+func TestPromptCarriesExplicitSpanishLanguageInstruction(t *testing.T) {
+	prompt, err := buildPrompt(BuildAnomalyPayload(m109Evidence()))
+	if err != nil {
+		t.Fatalf("buildPrompt returned error: %v", err)
+	}
+
+	const instruction = "Responde únicamente en español."
+	if !strings.Contains(prompt, instruction) {
+		t.Errorf("prompt is missing the explicit Spanish response-language instruction %q\nprompt:\n%s", instruction, prompt)
+	}
+
+	// The instruction must live next to the existing constraint, not inside the
+	// placeholder area where the model is told to explain the data.
+	prefix, _, found := strings.Cut(prompt, "Explica:")
+	if !found {
+		t.Fatalf("prompt no longer contains the data explanation section\nprompt:\n%s", prompt)
+	}
+	if strings.Contains(prefix, instruction) {
+		t.Errorf("Spanish instruction must not appear before the data payload\nprompt:\n%s", prompt)
+	}
+
+	// Add-only property: every pre-existing line must still be present verbatim.
+	for _, line := range []string{
+		"Analiza la siguiente anomalía eléctrica.",
+		"Datos:",
+		"Explica:",
+		"1. qué está ocurriendo",
+		"2. cuáles son las posibles causas",
+		"3. qué evidencia respalda cada hipótesis",
+		"4. qué debería revisar un operador",
+		"5. qué acciones recomienda",
+		"No inventes datos que no estén presentes.",
+	} {
+		if !strings.Contains(prompt, line) {
+			t.Errorf("prompt is missing the pre-existing line %q", line)
+		}
 	}
 }
 
