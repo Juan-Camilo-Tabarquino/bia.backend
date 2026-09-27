@@ -135,27 +135,32 @@ recibe información que **contradice** el código que está mirando.
 
 ## Grupo C — Robustez del código
 
-### C1 — Varianza sin guarda para una sola lectura
+### C1 — Varianza sin guarda para una sola lectura — **RESUELTO** (2026-09-27)
 
-- **Dónde:** `internal/analysis/baseline.go:67` —
-  `variance := varSum / float64(cnt-1)`.
-- **Qué pasa:** con `cnt == 1`, el denominador es `0` y el desvío estándar sale
-  **no finito** (`+Inf` o `NaN`). No hay guarda en esa etapa, y `Detect` solo
-  protege `b.Mean == 0` (`detector.go:58`), no un `StdDev` no finito.
-- **Por qué importa:** un medidor con una sola lectura —caso plausible con datos
-  reales, no con este dataset— deja el detector comparando contra un desvío
-  infinito. Las reglas de pico y caída usan `b.StdDev`, así que el
-  comportamiento pasa a ser indefinido.
-- **Estado de verificación:** verificado por lectura del código. **No hay
-  disparador en el dataset** (todos los medidores tienen 336 lecturas) y **no hay
-  test que lo cubra**.
-- **Terminado significa:** decisión explícita sobre qué debería pasar
-  (¿descartar el medidor?, ¿`StdDev = 0`?) implementada **y** un test que la fije.
-  Si se decide no hacer nada, documentarlo como decisión, no dejarlo implícito.
-- **Riesgo de la corrección:** tocar la línea base puede mover los resultados de
-  los 4 casos benchmark. El test de regresión del dataset
-  (`internal/analysis/requirements_dataset_test.go`) es la red de seguridad, y
-  hay que correrlo antes y después.
+- **Commit:** `3051333` — `fix(analysis): require two readings before computing a
+  meter baseline`.
+- **Qué pasaba, con los hechos corregidos:** el texto original de este item decía
+  `+Inf` y "comportamiento indefinido". No era así. Con `cnt == 1`, `varSum` es
+  idénticamente `0`, así que la división `0/0` daba **siempre `NaN`**, nunca
+  `+Inf`. Y **solo la regla de pico** (`detector.go:82`) consume `b.StdDev`; la
+  regla de caída es puramente porcentual y no lo mira. El modo de falla real no
+  era indefinido: el `NaN` llegaba a `baseline.stddev` en el DTO de
+  `/api/anomalies` y en el payload crudo de `/api/reports`, `json.Marshal` lo
+  rechaza (`unsupported value: NaN`) y **ambos handlers descartan el error de
+  encode**, así que respondían **200 con cuerpo vacío** en lugar de fallar
+  ruidosamente.
+- **Decisión:** exigir **al menos 2 lecturas** (`minReadingsForBaseline`, en
+  `internal/analysis/baseline.go`). Con menos, el medidor **queda afuera del mapa
+  de líneas base** y se lo reporta como **medidor no validado** en
+  `GET /api/dashboard/summary` (campo `unvalidatedMeters`); nunca se fabrica una
+  anomalía para él: no se agregó tipo, `Kind` ni severidad.
+- **Evidencia:** commit `3051333` y los tests
+  `TestBaselineCalculatorRequiresTwoReadings`,
+  `TestOrchestrator_DataGapsForSingleReadingMeter`,
+  `TestAnomaliesAndSummaryForSingleReadingMeter` y
+  `TestDashboardSummaryUnvalidatedMetersEmptyShape`. Los 4 resultados benchmark
+  de `requirements_dataset_test.go` quedaron sin cambios: todos los medidores del
+  dataset tienen 336 lecturas, así que la guarda no puede dispararse ahí.
 
 ### C2 — La prosa del clasificador ignora el signo de la desviación
 
@@ -192,21 +197,22 @@ recibe información que **contradice** el código que está mirando.
 
 ## Orden sugerido
 
-Si hay que elegir, el que más rinde por esfuerzo es **B4**, y después **C1**.
+Si hay que elegir, el que más rinde por esfuerzo es **B4**, y después el resto del
+drift documental (B1/B2/B3).
 
 1. **A0** primero, porque desbloquea (o cierra) todo el grupo A y no requiere
    escribir código.
 2. **B4** — el impacto es real para el frontend, el arreglo es acotado y es puro
    texto.
-3. **C1** — es el único bug latente del grupo C, pero **requiere decidir la
-   semántica** antes de tocar nada, y su corrección puede mover los resultados
-   benchmark.
-4. **B1/B2/B3** — juntos, porque son el mismo tipo de trabajo y comparten
+3. **B1/B2/B3** — juntos, porque son el mismo tipo de trabajo y comparten
    decisión de política ("¿qué hacemos con los documentos históricos?").
-5. **C2** — barato, pero conviene esperar a tener un caso que lo dispare o a
+4. **C2** — barato, pero conviene esperar a tener un caso que lo dispare o a
    tocarlo por otro motivo.
-6. **C3** — es una decisión de producto; no hay trabajo técnico hasta que se
+5. **C3** — es una decisión de producto; no hay trabajo técnico hasta que se
    tome.
+
+**C1 ya está resuelto** (commit `3051333`, 2026-09-27 y ver arriba), así que sale
+del conjunto de pendientes y no participa del orden.
 
 ## Fuera de alcance de este backlog
 

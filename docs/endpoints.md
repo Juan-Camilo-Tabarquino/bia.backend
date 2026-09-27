@@ -301,15 +301,32 @@ Source: `internal/api/handlers/ai.go:25-30, 63-82`.
 - `200 OK`:
 
 ```json
-{ "health": "ok", "meters": 2, "anomalies": 1, "lastRun": "latest" }
+{
+  "health": "ok",
+  "meters": 2,
+  "anomalies": 1,
+  "lastRun": "latest",
+  "unvalidatedMeters": {
+    "count": 0,
+    "meters": [],
+    "reason": "no hay suficiente información para validar: se requieren al menos 2 lecturas"
+  }
+}
 ```
 
 - `meters` is the current number of known meter ids, `anomalies` the number of
   evidence records produced by the last run.
 - `lastRun` is the literal placeholder string `"latest"`; the code does not
   compute a timestamp for it.
+- `unvalidatedMeters` is always present, including when `count` is `0`, so the
+  response shape is stable: `count` is the number of meters that passed the
+  quality check but have no baseline because they carry fewer than 2 readings;
+  `meters` is a `[]string` of their ids in ascending order that serializes as
+  `[]` and **never** as `null`; `reason` is the fixed contract string shown above.
+  These meters are intentionally **absent** from `/api/anomalies`: a data gap is
+  not an anomaly, so no `type`, kind or severity is invented for them.
 
-Source: `internal/api/handlers/ai.go:88-97`.
+Source: `internal/api/handlers/ai.go:91-118`.
 
 ---
 

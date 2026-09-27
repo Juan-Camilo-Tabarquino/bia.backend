@@ -166,6 +166,13 @@ transitividad, de las medianas horarias y de la detección.
 
 ### 5.2 Baseline — `baseline.go`
 
+**Precondición: al menos 2 lecturas por medidor**
+(`minReadingsForBaseline = 2`). La tabla y el párrafo de Bessel de abajo
+describen a los medidores que la cumplen. Con menos de 2 lecturas el medidor
+**queda afuera del mapa de líneas base**: su varianza y su desvío simplemente no
+se calculan. No se lo descarta en silencio — se lo reporta como **medidor no
+validado** en el resumen del dashboard, con la razón del contrato (§9).
+
 Calcula, por medidor, en dos pasadas:
 
 | Estadístico | Fórmula |
@@ -176,9 +183,13 @@ Calcula, por medidor, en dos pasadas:
 | Medias por señal | `VoltageMean = Σvoltage/cnt`, `CurrentMean`, `PowerFactorMean` |
 
 **La varianza usa corrección de Bessel** (denominador `cnt − 1`), y está
-documentado como intencional. Importante: se calcula sobre la **serie completa
-del medidor**, incluyendo la ventana anómala — o sea que una anomalía **infla su
-propia línea base** y se vuelve más difícil de detectar contra sí misma.
+documentado como intencional. Esa misma corrección es la razón de la
+precondición: con una sola lectura, `varSum` es idénticamente `0` y la división
+es `0/0`, o sea un desvío `NaN`. Exigir 2 lecturas vuelve ese desvío no finito
+**imposible** en lugar de improbable. Importante: la varianza se calcula sobre la
+**serie completa del medidor**, incluyendo la ventana anómala — o sea que una
+anomalía **infla su propia línea base** y se vuelve más difícil de detectar
+contra sí misma.
 
 Las medianas por hora del día **no** se calculan acá: viven en el detector.
 
@@ -588,6 +599,17 @@ Notas de contrato que conviene conocer:
   uno y dos minutos y medio con el proveedor real. Es una decisión de UX
   deliberada y el frontend le informa la latencia al usuario; por eso **no** hay
   estado pendiente que pollear.
+- `GET /api/dashboard/summary` **siempre** incluye `unvalidatedMeters`, también
+  cuando no hay ninguno:
+  `{"count": 0, "meters": [], "reason": "no hay suficiente información para validar: se requieren al menos 2 lecturas"}`.
+  `count` es la cantidad de medidores que pasaron el control de calidad pero no
+  tienen línea base por tener menos de 2 lecturas; `meters` es un `[]string` en
+  orden de id que **siempre** serializa como `[]` y **nunca** como `null`;
+  `reason` es el texto fijo del contrato. Esos medidores **no** aparecen en
+  `/api/anomalies`, y eso es deliberado: una falta de datos **no** es una
+  anomalía, así que no se inventa un `type`, un `Kind` ni una severidad para
+  ellos. La clave está presente incluso con `count` en `0`, para que la forma de
+  la respuesta sea estable.
 - `/api/reports` serializa el modelo de dominio `models.Evidence`, no el DTO. Sus
   claves JSON son por lo tanto nombres de campo Go (`MeterID`, `Baseline`), a
   diferencia de `/api/anomalies`, que usa los DTO con claves en snake_case.
@@ -644,11 +666,14 @@ ventana de correlación de 12 horas hacia adelante es la que hace el trabajo rea
 
 ## 11. Estrategia de tests
 
-La suite no se apoya en un solo test de integración: combina cinco enfoques.
+La suite no se apoya en un solo test de integración: combina seis enfoques.
 
 1. **Unitarios por etapa** con fixtures construidos a mano: aritmética de la
-   línea base, el pico por sigma con un fixture concreto, los cambios
-   porcentuales por señal y el caso `mean == 0` devolviendo exactamente `0`.
+   línea base, la precondición de las 2 lecturas (un medidor con una sola lectura
+   no recibe entrada en el mapa de líneas base, y ninguna línea base producida
+   puede tener un desvío no finito), el pico por sigma con un fixture concreto,
+   los cambios porcentuales por señal y el caso `mean == 0` devolviendo
+   exactamente `0`.
 2. **Pines de texto exacto**: el motivo, la acción y las descripciones
    determinísticas, las narrativas del mock y los cuerpos de error 404 se
    comparan por igualdad de string completo, no por `contains`. Así un cambio de
@@ -665,6 +690,12 @@ La suite no se apoya en un solo test de integración: combina cinco enfoques.
    exige exactamente 4 registros, con el tipo y la severidad de los 4 medidores
    benchmark, `confidence > 0.90` para M-109, todos los campos de texto no vacíos,
    línea base no trivial, y **ningún otro medidor** con evidencia.
+6. **Contrato HTTP de los medidores no validados**: un fixture hermético con un
+   medidor de una sola lectura deja fijo que `/api/anomalies` sigue siendo
+   decodable y que ese medidor **no** aparece ahí, y que `Detect` lo reporta como
+   falta de datos sin producir evidencia para él. El resumen del dashboard expone
+   `unvalidatedMeters` con el conteo, el arreglo de ids y la razón exacta,
+   también cuando `count` es `0` (con `meters` como `[]`, nunca `null`).
 
 Correr la suite:
 
@@ -709,10 +740,20 @@ Se listan porque son reales y están verificadas, no por completitud formal.
 
 **En el código:**
 
-- **Línea base con una sola lectura**: `variance = Σ(...)² / (cnt − 1)` no tiene
-  guarda para `cnt == 1`, así que un medidor con una única lectura produce un
-  desvío no finito. El dataset no lo dispara y no hay test que lo cubra. Es un
-  caso borde sin definir.
+- **Valores no finitos siguen entrando por la puerta de los datos**:
+  `internal/data/csv/loader.go` parsea los números con `strconv.ParseFloat`, que
+  acepta las cadenas `NaN`, `Inf` e `Infinity`, y `internal/analysis/quality.go`
+  solo descarta consumo negativo y status distinto de `OK`. Una lectura así
+  vuelve a producir una línea base no finita: la precondición de las 2 lecturas
+  no cubre este caso. En la misma familia, un `varSum` que desborde a `+Inf` con
+  entradas **finitas** enormes (por ejemplo `1e200`) da un desvío infinito;
+  estructuralmente abierto, aunque impracticable con datos de medidores reales.
+- **Los handlers descartan el error de `json.Marshal`**: `writeJSON`
+  (`internal/api/handlers/endpoints.go:206`) y el handler de `/api/reports`
+  (`internal/api/router.go:112`) ignoran el error de `Encode`, así que cualquier
+  valor no finito que llegue al payload responde **200 con cuerpo vacío** en vez
+  de fallar ruidosamente con un 500. Es el mismo modo de falla que disparaba el
+  `NaN` de una sola lectura, ahora alcanzable por la vía de los datos.
 - **`SERVER_PORT`**: el comentario de `config.go` documenta esa variable con
   default 8080, pero el código usa 3001 y nunca registra el binding. El puerto
   solo se cambia por `config.yaml`.
