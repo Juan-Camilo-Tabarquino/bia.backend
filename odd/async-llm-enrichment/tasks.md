@@ -85,6 +85,9 @@ Running authored-line count:
 | WU1 | 407 | 407 |
 | WU2 | 0 (cancelled after investigation) | 407 |
 | WU3 (docs) | 34 | 441 |
+| WU5 (round 1 fix) | 184 | 625 |
+| WU6 (round 2 fix) | 254 | 879 |
+| WU7 (doc corrections) | ~20 projected | ~899 |
 
 The scope shrank materially when WU2 was cancelled, so the `single-pr` decision
 still stands and no chain is needed. Do not ask again for this feature.
@@ -177,10 +180,43 @@ One writer thread only. No parallel writers in this worktree.
       closed on its own at tier `low` with reason `non_executable_only`, no
       lenses required (lineage `review-9682fa058ba5aa19`), then acknowledged
       with `authority: burned`.
-- [ ] **WU4 — Closure verification.** `go test ./...`, `go test -race ./...`,
-      and a live run measuring launch-to-listening (expect ~1 s, not 69 s) plus
-      confirming `/api/anomalies` returns the 4 benchmark cases immediately.
-      Evidence only, no commit.
+- [x] **WU4 — Closure verification.** DONE. Independent verifier
+      (`gentle-ai-verify`) returned `verified`: launch-to-listening measured
+      **0.065 s and 0.277 s** with the real provider (pre-fix 69 s cited and
+      structurally corroborated, not re-measured); the four benchmark cases
+      correct at the first request 0.065 s after launch; `llm_analysis` key
+      genuinely ABSENT (not present-and-empty) during warm-up; 447 concurrent
+      probes during enrichment all 200 with a maximum latency of 1.76 ms;
+      `GET /api/health` immediate; `POST /api/ai/analyze` returned populated
+      narratives. `go test ./...`, `go test -race ./...` and `go vet ./...`
+      green. `gofmt -l` lists 5 files, all proven pre-existing and unrelated to
+      this branch. The lock claim was falsified by reading the source, not by
+      trusting the writer's report.
+
+      The verifier reported no functional falsification and two documentation
+      divergences, both corrected in WU7.
+
+- [x] **WU5 — Round 1 fix for R3-001 (identity).** DONE, commit `efdd101`. The
+      first native review found the enrichment write-back could attach a
+      narrative to a DIFFERENT anomaly at the same index. RED reproduced
+      independently by the parent against the branch-point code in an isolated
+      `/tmp` worktree: `evidence[0] (M-NEW@...) carries a narrative generated for
+      a different anomaly: got "narrative for M-OLD@..."`. Fixed by comparing the
+      anomaly identity (meter id plus detection timestamp). 184 diff lines, as
+      declared and accepted.
+
+- [x] **WU6 — Round 2 fix for R3-001 (generation).** DONE, commit `aa16273`. The
+      second native review showed the identity check was still insufficient:
+      two `Detect` generations can carry the SAME anomaly identity at the same
+      index with different deterministic fields, so an older `Enrich` could
+      overwrite a newer narrative with superseded numbers. RED reproduced by the
+      parent against `efdd101`: the narrative built from
+      `consumption=30 / delta=0.8` landed on the payload with
+      `consumption=40 / delta=1.0`. Fixed with a snapshot generation counter
+      bumped in the same critical section that publishes the evidence;
+      `Enrich` captures it, exits early once superseded, and writes back only
+      while it still matches. `sameAnomaly` was removed because the generation
+      check strictly subsumes it. 254 diff lines (see the overshoot note below).
 
 ## Acceptance evidence
 
@@ -215,6 +251,45 @@ authentication`, and this machine holds no write credential (no `gh` CLI, no
 token). A permission failure ends further GitHub mutation, with no blind retry
 and no substitute command, so consumer state was preserved and the work resumed
 under the documented fallback. The prepared comment is recoverable from Engram.
+
+## Review rounds and closure state
+
+The native review machinery produced two real findings and then became unable to
+finish, for reasons outside this repository.
+
+| Lineage | Outcome | Cause |
+| --- | --- | --- |
+| `review-e3847285db5f51a0` | round 1: CRITICAL R3-001, corrected | `corrected_candidate_unavailable` — the candidate view is frozen at START, so a correction applied afterwards is invisible |
+| `review-2a23f7bdcbecda62` | round 2: R3-001 refined, corrected | same frozen-view limitation |
+| `review-9c32d44627d96aa0` | validation of the round 2 fix could not run | `native-operation-failed` (`prepared_reviewers: 1, submitted_reviewers: 0`), reconciliation escalated it: `native_stop_required`, `unknown_causality` |
+
+All three remain open. Escalated authority is terminal and cannot be abandoned,
+which is a known upstream defect (`Gentleman-Programming/gentle-ai#4553`,
+exact-match canonical tracker, open, no published fix; it also documents the
+same inability to abandon). The `assess` path is separately broken
+(`gentle-ai#4791`).
+
+The user authorized reporting both defects. Both occurrence comments were
+prepared and passed a final privacy scan, and both `POST`s were refused with
+`HTTP 401 Requires authentication` because this machine holds no GitHub write
+credential (no `gh` CLI, no token). Per contract a permission failure ends
+further GitHub mutation with no blind retry and no substitute command, so state
+was preserved. Both comment bodies are recoverable from Engram.
+
+**Closure decision (user, 2026-09-27): close here on our own evidence.** No
+further reviewer runs were spent. The two findings above are corrected and their
+REDs were reproduced by the parent from outside the writer's report; the full
+suite and the race detector are green.
+
+### Process overshoot to record honestly
+
+The round 2 correction plan was declared as **50** diff lines and the change
+landed at **254** (`+222/-32`). The plan was declared before implementing, which
+was the mistake; round 1 declared after implementing and matched exactly (184).
+The declared number is a plan, but the overshoot is real and is recorded here
+rather than smoothed over. The round 2 diff was reviewed for filler before
+committing: the size is comments plus a rigorously self-checking test, and it was
+NOT trimmed to fit a number.
 
 ## Non-goals
 
