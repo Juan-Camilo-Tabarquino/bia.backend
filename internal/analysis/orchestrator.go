@@ -26,9 +26,12 @@ type Orchestrator struct {
 	LLM             LLMClient
 	EvidenceBuilder EvidenceBuilder
 
-	// mu serialises Run and protects evidence/loaded, so the pipeline can be
-	// re-triggered from an HTTP handler while other goroutines read the current
-	// evidence.
+	// mu protects evidence/loaded. It is held only for short mutations and
+	// brief reads: Detect publishes the deterministic snapshot under a short
+	// write lock and Enrich writes each LLM narrative under a short write lock
+	// per item. It is deliberately NOT held across the slow LLM calls, so a
+	// concurrent Evidence() read is never blocked for the duration of the
+	// enrichment.
 	mu       sync.RWMutex
 	evidence []models.Evidence
 	loaded   bool
@@ -41,16 +44,23 @@ func NewOrchestrator(loader *csv.Loader, rrepo *memory.ReadingRepo, erepo *memor
 		Classifier: cl, Scorer: sc, LLM: llm, EvidenceBuilder: eb}
 }
 
-// Run executes the whole pipeline. It loads the files, processes them and
-// stores the resulting evidence internally.
+// Detect runs the fast, deterministic stage of the pipeline: it loads the
+// source files, populates the append-only repositories, runs every
+// deterministic stage and publishes the resulting evidence snapshot.
 //
-// Run is idempotent with respect to the in-memory repositories: the reading and
-// event repositories are append-only, so storing the loaded dataset on every
-// run would duplicate every reading and event. The repositories are populated
-// once and kept as the read model behind the meter endpoints; every call still
-// reloads the files and recomputes the evidence, which is what
+// Detect is the startup-critical half of the pipeline. It must stay fast so the
+// API port can open immediately; the slow narrative work lives in Enrich. The
+// expensive deterministic computation happens before the lock, and only the
+// final publication of the evidence slice is guarded, so the write lock is held
+// for an instant rather than for the whole pipeline.
+//
+// Detect is idempotent with respect to the in-memory repositories: the reading
+// and event repositories are append-only, so storing the loaded dataset on
+// every run would duplicate every reading and event. The repositories are
+// populated once and kept as the read model behind the meter endpoints; every
+// call still reloads the files and recomputes the evidence, which is what
 // POST /api/ai/analyze relies on.
-func (o *Orchestrator) Run() error {
+func (o *Orchestrator) Detect() error {
 	// Load from disk on every run so a re-run has fresh source data.
 	readings, err := o.Loader.LoadReadings()
 	if err != nil {
@@ -63,9 +73,18 @@ func (o *Orchestrator) Run() error {
 	}
 	log.Printf("Loaded %d events from %s", len(events), o.Loader.EventsPath)
 
-	o.mu.Lock()
-	defer o.mu.Unlock()
+	// Deterministic pipeline. It reads only local values, so it runs outside
+	// the lock: the LLM never participates in detection, classification or
+	// scoring; it only narrates the result later, in Enrich.
+	good := o.QualityChecker.Check(readings)
+	baseline := o.BaselineCalc.Calculate(good)
+	candidates := o.Detector.Detect(good, baseline)
+	correlated := o.Correlator.Correlate(candidates, events)
+	classified := o.Classifier.Classify(correlated)
+	scored := o.Scorer.Score(classified)
+	built := o.EvidenceBuilder.Build(scored)
 
+	o.mu.Lock()
 	// Populate the append-only repositories exactly once, no matter how many
 	// times the pipeline runs.
 	if !o.loaded {
@@ -73,25 +92,66 @@ func (o *Orchestrator) Run() error {
 		o.EventRepo.AddMany(events)
 		o.loaded = true
 	}
+	// Publish the complete deterministic snapshot. Hold the write lock only for
+	// this assignment: readers must never wait on the LLM stage below.
+	o.evidence = built
+	o.mu.Unlock()
+	return nil
+}
 
-	// Deterministic pipeline. The LLM runs strictly after detection,
-	// classification and scoring; it only narrates the result.
-	good := o.QualityChecker.Check(readings)
-	baseline := o.BaselineCalc.Calculate(good)
-	candidates := o.Detector.Detect(good, baseline)
-	correlated := o.Correlator.Correlate(candidates, events)
-	classified := o.Classifier.Classify(correlated)
-	scored := o.Scorer.Score(classified)
-	o.evidence = o.EvidenceBuilder.Build(scored)
-	if o.LLM != nil {
-		for i := range o.evidence {
-			txt, err := o.LLM.GenerateExplanation(o.evidence[i])
-			if err != nil {
-				continue
-			}
+// Enrich runs the slow, narrative LLM stage over the deterministic evidence
+// published by Detect.
+//
+// The write lock is deliberately NOT held across the LLM loop. The LLM may take
+// tens of seconds per item, and Evidence() reads the same lock, so holding it
+// here would turn a fast startup into a request stall on every read endpoint:
+// the connection would be accepted but the handler would block on the mutex.
+//
+// Instead the evidence is snapshotted under a brief read lock, every LLM call
+// happens outside any lock, and each item's narrative is written back under a
+// short write lock. Concurrent readers therefore observe the LLM text appearing
+// progressively instead of waiting for the whole loop to finish.
+//
+// Do not "optimize" this by collapsing the loop back under a single lock: that
+// reintroduces the startup stall this split exists to remove.
+func (o *Orchestrator) Enrich() {
+	o.mu.RLock()
+	if o.LLM == nil || len(o.evidence) == 0 {
+		o.mu.RUnlock()
+		return
+	}
+	// Snapshot the evidence so the slow LLM calls read stable inputs without
+	// holding any lock. The returned slice is a copy, so the loop cannot race a
+	// concurrent reader while it iterates.
+	snapshot := make([]models.Evidence, len(o.evidence))
+	copy(snapshot, o.evidence)
+	o.mu.RUnlock()
+
+	for i := range snapshot {
+		txt, err := o.LLM.GenerateExplanation(snapshot[i])
+		if err != nil {
+			continue
+		}
+		// Publish this item's narrative under a short write lock. The length
+		// guard keeps the write safe if Detect republished the snapshot while
+		// this loop was running.
+		o.mu.Lock()
+		if i < len(o.evidence) {
 			o.evidence[i].LLMText = txt
 		}
+		o.mu.Unlock()
 	}
+}
+
+// Run executes the whole pipeline as the deterministic Detect stage followed by
+// the narrative Enrich stage. It preserves the original post-conditions: when
+// Run returns, the evidence is published and carries the LLM text. The existing
+// call sites keep their exact observable semantics.
+func (o *Orchestrator) Run() error {
+	if err := o.Detect(); err != nil {
+		return err
+	}
+	o.Enrich()
 	return nil
 }
 
