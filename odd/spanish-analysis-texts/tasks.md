@@ -42,6 +42,10 @@ In scope:
    (feeds `data_quality.reason`).
 3. Deterministic mock narrative: `internal/analysis/llm.go:30,33,36,39,42`
    (visible whenever `LLM_API_KEY` is empty, i.e. offline/demo runs).
+   **Process note:** this item was listed in scope but was not assigned to any
+   work unit in the original task list — a real gap in the plan, found and
+   corrected 2026-09-27 when the `docs/endpoints.md` example turned out to quote
+   the mock text. It is now WU7.
 4. API error bodies surfaced to the frontend:
    `internal/api/handlers/ai.go:83,84,170` and
    `internal/api/handlers/endpoints.go:207`. The frontend renders
@@ -147,6 +151,11 @@ One writer thread only; no parallel writers in this worktree.
       `recommended_action`, `data_quality.reason` and
       `correlated_events[].description`, that `llm_analysis` is Spanish, and that
       the contract tokens are still the English machine values. Evidence only.
+- [ ] **WU7 — Spanish for the deterministic mock narrative.** Translate the five
+      `GenerateExplanation` strings in `internal/analysis/llm.go` that the mock
+      provider returns when `LLM_API_KEY` is empty, and add the missing test that
+      pins them: no existing test asserted the mock text, so nothing would catch
+      a regression there. Same format-verb discipline as WU1. Commit.
 
 ## Acceptance evidence
 
