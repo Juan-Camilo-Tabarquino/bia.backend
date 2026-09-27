@@ -40,6 +40,50 @@ func TestBaselineCalculator(t *testing.T) {
 	assertAlmostEqual(t, "M2 power factor mean", m2.PowerFactorMean, 0.8)
 }
 
+// TestBaselineCalculatorRequiresTwoReadings pins the minimum-readings rule: the
+// standard deviation uses Bessel's correction, so its denominator is (n-1) and a
+// single reading has no variance to divide. Such a meter must get NO baseline
+// entry at all, instead of an entry whose StdDev is NaN, and every baseline that
+// IS produced must be finite.
+func TestBaselineCalculatorRequiresTwoReadings(t *testing.T) {
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	readings := []models.Reading{
+		// Exactly one reading: the variance denominator would be zero.
+		{MeterID: "ONE", Timestamp: base, Consumption: 12, Voltage: 240, Current: 45, PowerFactor: 0.95},
+		// Two readings: the smallest sample that can produce a baseline.
+		{MeterID: "TWO", Timestamp: base, Consumption: 10, Voltage: 220, Current: 40, PowerFactor: 0.9},
+		{MeterID: "TWO", Timestamp: base.Add(time.Hour), Consumption: 20, Voltage: 220, Current: 60, PowerFactor: 0.95},
+	}
+
+	baselines := NewBaselineCalculator().Calculate(readings)
+
+	if got, ok := baselines["ONE"]; ok {
+		t.Fatalf("a meter with a single reading must get no baseline, got %+v", got)
+	}
+	// A meter with zero readings has no accumulator at all, so it must not
+	// appear in the result either.
+	if got, ok := baselines["ZERO"]; ok {
+		t.Fatalf("a meter with zero readings must get no baseline, got %+v", got)
+	}
+	if len(baselines) != 1 {
+		t.Fatalf("expected exactly 1 baseline (TWO), got %d: %+v", len(baselines), baselines)
+	}
+	two, ok := baselines["TWO"]
+	if !ok {
+		t.Fatalf("expected a baseline for TWO, got %+v", baselines)
+	}
+	assertAlmostEqual(t, "TWO mean", two.Mean, 15)
+
+	for id, b := range baselines {
+		if math.IsNaN(b.Mean) || math.IsInf(b.Mean, 0) {
+			t.Errorf("meter %s: Mean must be finite, got %v", id, b.Mean)
+		}
+		if math.IsNaN(b.StdDev) || math.IsInf(b.StdDev, 0) {
+			t.Errorf("meter %s: StdDev must be finite, got %v", id, b.StdDev)
+		}
+	}
+}
+
 // assertAlmostEqual compares two floats with a tolerance tight enough to catch
 // real errors but immune to the binary representation of decimals.
 func assertAlmostEqual(t *testing.T, label string, got, want float64) {

@@ -128,21 +128,38 @@ One writer thread only; no parallel writers in this worktree.
 
 ## Tasks
 
-- [ ] **WU1 — Spanish for the deterministic analysis prose.** Translate the
+- [x] **WU1 — Spanish for the deterministic analysis prose.** Translate the
       literals in `evidenceBuilder.go` and `detector.go`. RED first: a test that
       asserts the Spanish output and fails against the English literals. Update
       every existing test that asserts the old English text. Commit.
-- [ ] **WU2 — Spanish for the API error bodies.** Translate the error strings in
+      DONE (verified): `internal/analysis/evidenceBuilder.go` `describeEvidence`
+      and `recommendAction` emit Spanish for every branch, and
+      `internal/analysis/detector.go` `electricalInconsistency` returns Spanish
+      (`tensión ... V fuera de [...]`, `factor de potencia ... por debajo de`).
+      Covered by `internal/analysis/evidenceBuilder_test.go`.
+- [x] **WU2 — Spanish for the API error bodies.** Translate the error strings in
       `handlers/ai.go` (the not-found messages) and `handlers/endpoints.go`,
       with tests asserting the new Spanish bodies and the same status codes.
       Do NOT touch the `"completed"` token in `analysisResultDTO`. Commit.
-- [ ] **WU3 — Explicit response-language instruction.** Add the instruction to
+      DONE (verified): `internal/api/handlers/ai.go` returns `medidor %s no
+      encontrado`, `anomalía %s no encontrada` and `análisis %s no encontrado`,
+      and `internal/api/handlers/endpoints.go` shares `writeJSONError`. The
+      `"completed"` token is unchanged in `analysisResultDTO`.
+- [x] **WU3 — Explicit response-language instruction.** Add the instruction to
       `explanationPromptTemplate` and a test asserting the prompt carries it.
       Commit.
-- [ ] **WU4 — Spanish dataset descriptions.** Translate the four `description`
+      DONE (verified): `internal/ai/provider.go` `explanationPromptTemplate`
+      ends with `Responde únicamente en español.`, pinned by
+      `TestPromptCarriesExplicitSpanishLanguageInstruction` in
+      `internal/ai/provider_test.go`.
+- [x] **WU4 — Spanish dataset descriptions.** Translate the four `description`
       values in `data/events.csv`, keeping the CSV schema and the event types
       untouched. Confirm nothing outside the dataset depends on the exact English
       strings. Commit.
+      DONE (verified): `data/events.csv:2-5` now carries the Spanish descriptions
+      (`Nueva línea de producción activada`, `Parada programada de mantenimiento
+      de 12 horas`, `Sin evento operativo reportado`, `Lecturas intermitentes y
+      saltos eléctricos anómalos`) with the schema and event types untouched.
 - [x] **WU5 — Align the documented examples.** DONE, commit `56d62e5`.
       Updated the `reason`, `recommended_action` and `llm_analysis` examples of
       the anomaly payload, the `explanation` and `recommendation` examples of

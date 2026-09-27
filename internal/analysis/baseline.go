@@ -37,6 +37,14 @@ type meterAccumulator struct {
 	powerFactor float64
 }
 
+// minReadingsForBaseline is the smallest number of readings a meter needs before
+// a baseline can be computed. The standard deviation uses Bessel's correction,
+// so its denominator is (n-1) and a meter with a single reading has no variance
+// to divide at all: the result would be 0/0, i.e. NaN. Such a meter is left out
+// of the baseline map and reported as an unvalidated meter instead of carrying a
+// non-finite baseline into the detector and the JSON payloads.
+const minReadingsForBaseline = 2
+
 func (b *baselineCalculator) Calculate(readings []models.Reading) map[string]models.Baseline {
 	accumulators := make(map[string]*meterAccumulator)
 	for _, r := range readings {
@@ -55,6 +63,13 @@ func (b *baselineCalculator) Calculate(readings []models.Reading) map[string]mod
 	result := make(map[string]models.Baseline)
 	for id, a := range accumulators {
 		cnt := a.count
+		// Bessel's correction divides the variance by (cnt-1), so a single
+		// reading cannot produce a standard deviation: varSum is identically 0
+		// and the division would be 0/0 = NaN. Skip the meter instead; callers
+		// report it as unvalidated rather than carrying a non-finite baseline.
+		if cnt < minReadingsForBaseline {
+			continue
+		}
 		mean := a.consumption / float64(cnt)
 		varSum := 0.0
 		for _, r := range readings {

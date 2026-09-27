@@ -54,6 +54,81 @@ func testEventsCSV() string {
 	return "event_id,event_type,timestamp,description\n"
 }
 
+// The hermetic fixture below pins the minimum-readings rule end to end. It is
+// deliberately separate from testReadingsCSV: TestDashboardSummaryEndpoint
+// asserts that shared fixture has exactly two meters, so it must not grow a
+// third one.
+const (
+	// singleReadingMeter has exactly ONE electrically inconsistent reading.
+	singleReadingMeter = "U-1"
+	// gappedNormalMeter stays inside every sane range and produces no gap.
+	gappedNormalMeter = "N-1"
+)
+
+// insufficientReadingsReason is the exact user-visible reason the summary must
+// publish. It is spelled out here rather than referencing the analysis constant
+// on purpose: this end-to-end test pins the literal HTTP contract instead of
+// mirroring the implementation.
+const insufficientReadingsReason = "no hay suficiente información para validar: se requieren al menos 2 lecturas"
+
+// singleReadingReadingsCSV builds one meter with exactly ONE electrically
+// inconsistent reading (voltage above the sane [209, 231] band, which is what
+// electricalInconsistency detects) plus one normal meter with several consistent
+// readings. Before the minimum-readings guard, the single reading took the
+// data-quality branch, carried a NaN baseline into the anomaly DTO and made
+// json.Marshal reject the payload, so /api/anomalies answered 200 with an EMPTY
+// body.
+func singleReadingReadingsCSV() string {
+	var b strings.Builder
+	b.WriteString("meter_id,timestamp,consumption_kwh,voltage_v,current_a,power_factor,status\n")
+	base := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	fmt.Fprintf(&b, "%s,%s,12.00,240.00,45.00,0.95,OK\n",
+		singleReadingMeter, base.Format("2006-01-02 15:04:05"))
+	for hour := 1; hour <= 4; hour++ {
+		ts := base.Add(time.Duration(hour) * time.Hour).Format("2006-01-02 15:04:05")
+		fmt.Fprintf(&b, "%s,%s,10.00,220.00,45.00,0.95,OK\n", gappedNormalMeter, ts)
+	}
+	return b.String()
+}
+
+// newEnvironmentWithReadings builds a router-backed test server over a caller
+// supplied readings CSV and the shared empty events file, then runs the real
+// pipeline once. It mirrors newTestEnvironmentWithLLM so the hermetic fixture
+// above exercises exactly the same production wiring.
+func newEnvironmentWithReadings(t *testing.T, readingsCSV string) (*httptest.Server, *analysis.Orchestrator) {
+	t.Helper()
+	dir := t.TempDir()
+	readingsPath := filepath.Join(dir, "readings.csv")
+	eventsPath := filepath.Join(dir, "events.csv")
+	if err := os.WriteFile(readingsPath, []byte(readingsCSV), 0o600); err != nil {
+		t.Fatalf("write readings csv: %v", err)
+	}
+	if err := os.WriteFile(eventsPath, []byte(testEventsCSV()), 0o600); err != nil {
+		t.Fatalf("write events csv: %v", err)
+	}
+
+	orchestrator := analysis.NewOrchestrator(
+		csv.NewLoader(readingsPath, eventsPath),
+		memory.NewReadingRepo(),
+		memory.NewEventRepo(),
+		analysis.NewQualityChecker(),
+		analysis.NewBaselineCalculator(),
+		analysis.NewAnomalyDetector(),
+		analysis.NewEventCorrelator(),
+		analysis.NewClassifier(),
+		analysis.NewScorer(),
+		analysis.NewMockLLM(),
+		analysis.NewEvidenceBuilder(),
+	)
+	if err := orchestrator.Run(); err != nil {
+		t.Fatalf("orchestrator run: %v", err)
+	}
+
+	server := httptest.NewServer(api.NewRouter(orchestrator))
+	t.Cleanup(server.Close)
+	return server, orchestrator
+}
+
 // failingLLM is a deterministic LLMClient whose explanation call always fails,
 // mirroring a provider that is not configured or is unreachable. The
 // orchestrator leaves LLMText empty in that case.
@@ -705,6 +780,108 @@ func TestDashboardSummaryEndpoint(t *testing.T) {
 	if summary.Anomalies != 1 {
 		t.Fatalf("expected 1 anomaly, got %d", summary.Anomalies)
 	}
+}
+
+// TestAnomaliesAndSummaryForSingleReadingMeter is the end-to-end regression test
+// for the baseline minimum-readings guard. The fixture carries one meter with
+// exactly one electrically inconsistent reading, which before the guard took the
+// data-quality branch of the detector, carried a NaN baseline into the anomaly
+// DTO and made the JSON encoder reject the whole payload, so /api/anomalies
+// answered 200 with an EMPTY body. After the guard the meter has no baseline at
+// all: it is never an anomaly and is reported as unvalidated in the dashboard
+// summary instead.
+func TestAnomaliesAndSummaryForSingleReadingMeter(t *testing.T) {
+	server, _ := newEnvironmentWithReadings(t, singleReadingReadingsCSV())
+
+	// (a) The anomaly list must be a decodable JSON body that does NOT contain
+	// the single-reading meter.
+	status, raw := getStatus(t, server.URL+"/api/anomalies")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/anomalies: expected 200, got %d (body %q)", status, raw)
+	}
+	if strings.TrimSpace(raw) == "" {
+		t.Fatal("GET /api/anomalies returned an empty body: a non-finite baseline reached the JSON encoder")
+	}
+	var list []anomalyBody
+	if err := json.Unmarshal([]byte(raw), &list); err != nil {
+		t.Fatalf("decode /api/anomalies: %v (body %q)", err, raw)
+	}
+	for _, a := range list {
+		if a.MeterID == singleReadingMeter {
+			t.Errorf("the meter with a single reading must never be reported as an anomaly: %+v", a)
+		}
+	}
+
+	// (b) The dashboard summary must report that meter as unvalidated.
+	var summary struct {
+		UnvalidatedMeters struct {
+			Count  int      `json:"count"`
+			Meters []string `json:"meters"`
+			Reason string   `json:"reason"`
+		} `json:"unvalidatedMeters"`
+	}
+	getJSON(t, server.URL+"/api/dashboard/summary", &summary)
+	if summary.UnvalidatedMeters.Count != 1 {
+		t.Fatalf("expected unvalidatedMeters.count 1, got %d (%+v)",
+			summary.UnvalidatedMeters.Count, summary.UnvalidatedMeters)
+	}
+	if want := []string{singleReadingMeter}; !reflect.DeepEqual(summary.UnvalidatedMeters.Meters, want) {
+		t.Fatalf("expected unvalidatedMeters.meters %v, got %v", want, summary.UnvalidatedMeters.Meters)
+	}
+	if summary.UnvalidatedMeters.Reason != insufficientReadingsReason {
+		t.Fatalf("expected unvalidatedMeters.reason %q, got %q",
+			insufficientReadingsReason, summary.UnvalidatedMeters.Reason)
+	}
+}
+
+// TestDashboardSummaryUnvalidatedMetersEmptyShape pins the stable shape of the
+// new key on a fixture with no data gaps: the key is ALWAYS present, count is 0,
+// and meters serialises as an empty JSON array rather than null.
+func TestDashboardSummaryUnvalidatedMetersEmptyShape(t *testing.T) {
+	// The shared fixture gives every meter 24 readings, so no meter is
+	// unvalidated there.
+	server, _ := newTestEnvironment(t)
+
+	status, raw := getStatus(t, server.URL+"/api/dashboard/summary")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/dashboard/summary: expected 200, got %d (body %q)", status, raw)
+	}
+	var summary map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		t.Fatalf("decode summary: %v (body %q)", err, raw)
+	}
+	rawGaps, ok := summary["unvalidatedMeters"]
+	if !ok {
+		t.Fatalf("unvalidatedMeters must always be present, got keys %v (body %q)", mapKeys(summary), raw)
+	}
+	var gaps struct {
+		Count  int             `json:"count"`
+		Meters json.RawMessage `json:"meters"`
+		Reason string          `json:"reason"`
+	}
+	if err := json.Unmarshal(rawGaps, &gaps); err != nil {
+		t.Fatalf("decode unvalidatedMeters: %v (raw %s)", err, rawGaps)
+	}
+	if gaps.Count != 0 {
+		t.Fatalf("expected count 0 on the shared fixture, got %d", gaps.Count)
+	}
+	if got := string(gaps.Meters); got != "[]" {
+		t.Fatalf("unvalidatedMeters.meters must serialise as [] and never null, got %s", got)
+	}
+	if gaps.Reason != insufficientReadingsReason {
+		t.Fatalf("expected reason %q, got %q", insufficientReadingsReason, gaps.Reason)
+	}
+}
+
+// mapKeys returns the sorted keys of a decoded JSON object, so a failure message
+// lists the published fields instead of only their count.
+func mapKeys(m map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // TestOrchestratorRunTwiceDoesNotDuplicateReadings proves Run is idempotent

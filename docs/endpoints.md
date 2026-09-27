@@ -83,7 +83,7 @@ enrichment in a background goroutine), `internal/analysis/orchestrator.go`
 - `200 OK` with the literal body `{"status":"ok"}` (written byte-for-byte, no
   trailing newline).
 
-Source: `internal/api/router.go:106-109`.
+Source: `internal/api/handlers/endpoints.go:15-19`.
 
 ## GET /api/reports
 
@@ -122,7 +122,7 @@ Notes derived from the code:
   sub-second precision when present).
 - An empty evidence set produces `{"reports":[]}`.
 
-Source: `internal/api/router.go:111-121`, `internal/domain/models/reading.go:82-95`.
+Source: `internal/api/router.go:106-116`, `internal/domain/models/reading.go:107-120`.
 
 ## GET /api/meters
 
@@ -136,7 +136,7 @@ Source: `internal/api/router.go:111-121`, `internal/domain/models/reading.go:82-
 
 Order is map-iteration order (not sorted). With no meters loaded the body is `[]`.
 
-Source: `internal/api/handlers/endpoints.go:22-30` (`AllMeterIDs` returns
+Source: `internal/api/handlers/endpoints.go:22-28` (`AllMeterIDs` returns
 `[]string`, `internal/data/memory/repository.go:44`).
 
 ## GET /api/meters/{meterId}
@@ -166,7 +166,7 @@ Source: `internal/api/handlers/endpoints.go:22-30` (`AllMeterIDs` returns
   for them, so no values are invented.
 - Unknown meter: `404 Not Found` with `{"error":"medidor <meterId> no encontrado"}`.
 
-Source: `internal/api/handlers/ai.go:32-41, 105-147`.
+Source: `internal/api/handlers/ai.go:32-41, 125-165`.
 
 ## GET /api/meters/{meterId}/readings
 
@@ -198,7 +198,7 @@ Source: `internal/api/handlers/ai.go:32-41, 105-147`.
 - Unknown meter, or a window with no matching readings: `200 OK` with the body
   `null` (the repository returns a nil slice). There is no 404 on this route.
 
-Source: `internal/api/router.go:43-76`, `internal/domain/models/reading.go:9-18`.
+Source: `internal/api/router.go:43-75`, `internal/domain/models/reading.go:9-18`.
 
 ## GET /api/anomalies
 
@@ -217,16 +217,55 @@ Source: `internal/api/router.go:43-76`, `internal/domain/models/reading.go:9-18`
     "reason": "El consumo del medidor T-1 está 50.0% por encima de su línea base sin ningún evento operativo conocido.",
     "recommended_action": "Revisar el medidor y su instalación.",
     "status": "unexplained",
+    "priority": 1,
+    "baseline": {
+      "mean": 0.8,
+      "stddev": 0.1,
+      "count": 336,
+      "voltage_mean": 230,
+      "current_mean": 5,
+      "power_factor_mean": 0.95
+    },
+    "consumption_change_pct": 50,
+    "voltage_change_pct": 0.4,
+    "current_change_pct": 2.1,
+    "power_factor_change_pct": -0.5,
+    "correlated_events": [],
+    "data_quality": {
+      "flagged": false,
+      "reason": ""
+    },
     "llm_analysis": "Revisión determinista del medidor T-1: el consumo está 50.0% por encima de su línea base sin ningún evento operativo; las firmas eléctricas respaldan una anomalía real (confianza 0.90)."
   }
 ]
 ```
 
-An empty evidence set produces `[]`. `llm_analysis` is present only when the
-LLM produced a narrative for that anomaly; see
-[Anomaly fields are real pipeline values](#anomaly-fields-are-real-pipeline-values).
+The object emits 18 fields (the DTO is `AnomalyDTO` and its nested types in
+`internal/api/handlers/endpoints.go`):
 
-Source: `internal/api/handlers/endpoints.go:67-77, 90-118, 135-141`.
+- `id`, `meter_id`, `detected_at`, `type`, `severity`, `reason`,
+  `recommended_action`, `status`: strings. `detected_at` is UTC RFC3339.
+- `confidence`: number (float64), between 0 and 1.
+- `priority`: integer (int), the deterministic investigation order (1 = most
+  urgent), published as-is by the API and never recomputed here.
+- `baseline`: object, the per-meter statistics the anomaly was compared against.
+  Sub-keys: `mean`, `stddev`, `voltage_mean`, `current_mean` and
+  `power_factor_mean` are numbers (float64); `count` is an integer (int).
+- `consumption_change_pct`, `voltage_change_pct`, `current_change_pct` and
+  `power_factor_change_pct`: numbers (float64), the signed per-signal changes
+  against the baseline means, in percent.
+- `correlated_events`: **array of objects**, and always an array, **never
+  `null`**: it is `[]` when no operational event explains the anomaly. Each
+  element has `id`, `type`, `start`, `end` and `description` (all strings;
+  `start` and `end` are UTC RFC3339).
+- `data_quality`: object with `flagged` (boolean) and `reason` (string).
+- `llm_analysis`: string; present only when the LLM produced a narrative for
+  that anomaly (see
+  [Anomaly fields are real pipeline values](#anomaly-fields-are-real-pipeline-values)).
+
+An empty evidence set produces `[]`.
+
+Source: `internal/api/handlers/endpoints.go:36-72, 113-169, 216-220`.
 
 ## GET /api/anomalies/{id}
 
@@ -238,7 +277,7 @@ Source: `internal/api/handlers/endpoints.go:67-77, 90-118, 135-141`.
 - `200 OK` with a single anomaly object (same shape as a list element).
 - Unknown id: `404 Not Found` with `{"error":"anomalía <id> no encontrada"}`.
 
-Source: `internal/api/handlers/ai.go:149-172`, `internal/api/handlers/endpoints.go:83-85, 90-111`.
+Source: `internal/api/handlers/ai.go:169-186`, `internal/api/handlers/endpoints.go:104-106, 113-169`.
 
 ## POST /api/ai/analyze
 
@@ -257,7 +296,7 @@ Source: `internal/api/handlers/ai.go:149-172`, `internal/api/handlers/endpoints.
 - `500 Internal Server Error` if the pipeline run fails, with
   `{"error":"<error message>"}`.
 
-Source: `internal/api/handlers/ai.go:44-56`.
+Source: `internal/api/handlers/ai.go:44-60`.
 
 ## GET /api/ai/analysis/{id}
 
@@ -293,7 +332,7 @@ The `anomalies` elements are the same anomaly object shape as `GET /api/anomalie
 - The store is an in-memory map in the process: ids are valid only for the
   lifetime of the running process, and are lost on restart.
 
-Source: `internal/api/handlers/ai.go:25-30, 63-82`.
+Source: `internal/api/handlers/ai.go:25-29, 63-88`.
 
 ## GET /api/dashboard/summary
 
@@ -301,15 +340,32 @@ Source: `internal/api/handlers/ai.go:25-30, 63-82`.
 - `200 OK`:
 
 ```json
-{ "health": "ok", "meters": 2, "anomalies": 1, "lastRun": "latest" }
+{
+  "health": "ok",
+  "meters": 2,
+  "anomalies": 1,
+  "lastRun": "latest",
+  "unvalidatedMeters": {
+    "count": 0,
+    "meters": [],
+    "reason": "no hay suficiente información para validar: se requieren al menos 2 lecturas"
+  }
+}
 ```
 
 - `meters` is the current number of known meter ids, `anomalies` the number of
   evidence records produced by the last run.
 - `lastRun` is the literal placeholder string `"latest"`; the code does not
   compute a timestamp for it.
+- `unvalidatedMeters` is always present, including when `count` is `0`, so the
+  response shape is stable: `count` is the number of meters that passed the
+  quality check but have no baseline because they carry fewer than 2 readings;
+  `meters` is a `[]string` of their ids in ascending order that serializes as
+  `[]` and **never** as `null`; `reason` is the fixed contract string shown above.
+  These meters are intentionally **absent** from `/api/anomalies`: a data gap is
+  not an anomaly, so no `type`, kind or severity is invented for them.
 
-Source: `internal/api/handlers/ai.go:88-97`.
+Source: `internal/api/handlers/ai.go:91-118`.
 
 ---
 
@@ -318,7 +374,7 @@ Source: `internal/api/handlers/ai.go:88-97`.
 The anomaly fields below are produced by the deterministic analysis pipeline and
 carried through unchanged by the API (they are not placeholders). Their string
 values are part of the public contract
-(`internal/domain/models/anomaly.go:7-36`, `internal/domain/models/reading.go:82-95`):
+(`internal/domain/models/anomaly.go:7-40`, `internal/domain/models/reading.go:107-120`):
 
 - `type`: `REAL_ANOMALY` | `EXPLAINABLE_ANOMALY` | `FALSE_POSITIVE` | `DATA_QUALITY`.
 - `severity`: `LOW` | `MEDIUM` | `HIGH`.
@@ -345,7 +401,7 @@ values are part of the public contract
 ## CORS
 
 Every registered handler is wrapped by the same `corsWrapper`
-(`internal/api/router.go:13-23`):
+(`internal/api/router.go:13-24`):
 
 - `Access-Control-Allow-Origin: *`
 - `Access-Control-Allow-Methods: GET, POST, OPTIONS`

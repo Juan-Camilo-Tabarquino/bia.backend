@@ -22,6 +22,68 @@ func createTempCSV(content string) (string, error) {
 	return f.Name(), nil
 }
 
+// TestOrchestrator_DataGapsForSingleReadingMeter pins the analysis-side signal:
+// a meter that survives the quality check but has too few readings for a
+// baseline is reported as a data gap, is never turned into evidence, and the gap
+// carries the exact user-visible reason.
+func TestOrchestrator_DataGapsForSingleReadingMeter(t *testing.T) {
+	readingsCSV := "meter_id,timestamp,consumption,voltage,current,power_factor,status\n" +
+		// Exactly one reading: no baseline can be computed for this meter.
+		"M-ONE,2026-09-01 00:00:00,12,240,45,0.95,OK\n" +
+		// A normal meter with several readings, so the gap signal is selective.
+		"M-MANY,2026-09-01 00:00:00,10,220,45,0.95,OK\n" +
+		"M-MANY,2026-09-01 01:00:00,10,220,45,0.95,OK\n" +
+		"M-MANY,2026-09-01 02:00:00,10,220,45,0.95,OK\n"
+	rPath, err := createTempCSV(readingsCSV)
+	if err != nil {
+		t.Fatalf("failed to create temp readings csv: %v", err)
+	}
+	defer os.Remove(rPath)
+	ePath, err := createTempCSV("event_id,event_type,start_time,end_time,description\n")
+	if err != nil {
+		t.Fatalf("failed to create temp events csv: %v", err)
+	}
+	defer os.Remove(ePath)
+
+	orch := analysis.NewOrchestrator(
+		csv.NewLoader(rPath, ePath),
+		memory.NewReadingRepo(),
+		memory.NewEventRepo(),
+		analysis.NewQualityChecker(),
+		analysis.NewBaselineCalculator(),
+		analysis.NewAnomalyDetector(),
+		analysis.NewEventCorrelator(),
+		analysis.NewClassifier(),
+		analysis.NewScorer(),
+		analysis.NewMockLLM(),
+		analysis.NewEvidenceBuilder(),
+	)
+	if err := orch.Detect(); err != nil {
+		t.Fatalf("Detect returned an error: %v", err)
+	}
+
+	gaps := orch.DataGaps()
+	if len(gaps) != 1 {
+		t.Fatalf("expected exactly 1 data gap, got %d: %+v", len(gaps), gaps)
+	}
+	gap := gaps[0]
+	if gap.MeterID != "M-ONE" {
+		t.Errorf("expected gap for M-ONE, got %q", gap.MeterID)
+	}
+	if gap.Readings != 1 {
+		t.Errorf("expected the gap to report 1 reading, got %d", gap.Readings)
+	}
+	if gap.Reason != analysis.InsufficientReadingsReason {
+		t.Errorf("expected reason %q, got %q", analysis.InsufficientReadingsReason, gap.Reason)
+	}
+
+	for _, e := range orch.Evidence() {
+		if e.Anomaly.MeterID == "M-ONE" {
+			t.Errorf("a meter reported as a data gap must not produce evidence: %+v", e)
+		}
+	}
+}
+
 func TestOrchestrator_Run_Empty(t *testing.T) {
 	// Prepare minimal CSV files with only headers.
 	readingsHeader := "meter_id,timestamp,consumption,voltage,current,power_factor\n"

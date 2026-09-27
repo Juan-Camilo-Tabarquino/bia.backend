@@ -156,11 +156,13 @@ ai-energy/
 
 ### Phase 4: API Layer & HTTP Handlers
 1. Expose REST endpoints:
-   - `GET /api/v1/health`: Basic health check.
-   - `GET /api/v1/meters`: List of monitored meters.
-   - `GET /api/v1/meters/{id}/readings`: Raw/aggregated readings.
-   - `GET /api/v1/anomalies`: List of all detected anomalies with scores and AI recommendations.
-   - `GET /api/v1/anomalies/{meter_id}`: Detailed investigation for a specific meter.
+   - `GET /api/health`: Basic health check.
+   - `GET /api/meters`: List of monitored meters.
+   - `GET /api/meters/{id}/readings`: Raw/aggregated readings.
+   - `GET /api/anomalies`: List of all detected anomalies with scores and AI recommendations.
+   - `GET /api/anomalies/{id}`: Detailed investigation for a specific anomaly.
+
+**Note on the prefix:** the original intent was to version these routes under `/api/v1/...`, but that was never implemented. The service registers every route under the single `/api` prefix, and `/api/v1/*` is deliberately rejected (it returns `404`, pinned by `TestRouterRegistersOnlyAPIPrefixedRoutes`). See [`docs/endpoints.md`](./endpoints.md) for the current contract.
 
 ### Phase 5: Testing
 1. Unit tests for statistical detection, event correlation logic, and data validation modules.
