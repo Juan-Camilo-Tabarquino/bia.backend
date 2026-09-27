@@ -27,18 +27,18 @@ func (m *mockLLM) GenerateExplanation(e models.Evidence) (string, error) {
 	meter := string(e.Anomaly.MeterID)
 	switch e.Type {
 	case models.AnomalyReal:
-		return fmt.Sprintf("Deterministic review of meter %s: consumption is %.1f%% above baseline with no operational event; electrical signatures support a real anomaly (confidence %.2f).",
+		return fmt.Sprintf("Revisión determinista del medidor %s: el consumo está %.1f%% por encima de su línea base sin ningún evento operativo; las firmas eléctricas respaldan una anomalía real (confianza %.2f).",
 			meter, e.Anomaly.Delta*100, e.Confidence), nil
 	case models.AnomalyDataQuality:
-		return fmt.Sprintf("Deterministic review of meter %s: consumption is stable but the electrical readings are inconsistent; treat this as a data-quality problem (confidence %.2f).",
+		return fmt.Sprintf("Revisión determinista del medidor %s: el consumo es estable pero las lecturas eléctricas son inconsistentes; esto debe tratarse como un problema de calidad de datos (confianza %.2f).",
 			meter, e.Confidence), nil
 	case models.AnomalyExplainable:
-		return fmt.Sprintf("Deterministic review of meter %s: the %.1f%% change matches a registered operational change (confidence %.2f).",
+		return fmt.Sprintf("Revisión determinista del medidor %s: la variación de %.1f%% coincide con un cambio operativo registrado (confianza %.2f).",
 			meter, e.Anomaly.Delta*100, e.Confidence), nil
 	case models.AnomalyFalsePositive:
-		return fmt.Sprintf("Deterministic review of meter %s: the change is a false positive caused by planned maintenance (confidence %.2f).",
+		return fmt.Sprintf("Revisión determinista del medidor %s: la variación es un falso positivo causado por mantenimiento planificado (confianza %.2f).",
 			meter, e.Confidence), nil
 	default:
-		return fmt.Sprintf("Deterministic review of meter %s: no anomaly classification available.", meter), nil
+		return fmt.Sprintf("Revisión determinista del medidor %s: no hay una clasificación de anomalía disponible.", meter), nil
 	}
 }
