@@ -26,15 +26,23 @@ type Orchestrator struct {
 	LLM             LLMClient
 	EvidenceBuilder EvidenceBuilder
 
-	// mu protects evidence/loaded. It is held only for short mutations and
-	// brief reads: Detect publishes the deterministic snapshot under a short
-	// write lock and Enrich writes each LLM narrative under a short write lock
-	// per item. It is deliberately NOT held across the slow LLM calls, so a
-	// concurrent Evidence() read is never blocked for the duration of the
-	// enrichment.
+	// mu protects evidence/loaded/generation. It is held only for short
+	// mutations and brief reads: Detect publishes the deterministic snapshot
+	// under a short write lock and Enrich writes each LLM narrative under a
+	// short write lock per item. It is deliberately NOT held across the slow LLM
+	// calls, so a concurrent Evidence() read is never blocked for the duration of
+	// the enrichment.
 	mu       sync.RWMutex
 	evidence []models.Evidence
 	loaded   bool
+	// generation is a monotonically increasing counter bumped every time Detect
+	// publishes a new evidence snapshot. It identifies the snapshot as a whole,
+	// not an individual item: two consecutive snapshots may contain the same
+	// anomaly identity (meter id and timestamp) with different deterministic
+	// fields, so item identity alone cannot tell Enrich that the data it narrated
+	// has been superseded. A changed generation is the proof that a republish
+	// happened. Protected by mu.
+	generation uint64
 }
 
 func NewOrchestrator(loader *csv.Loader, rrepo *memory.ReadingRepo, erepo *memory.EventRepo,
@@ -92,9 +100,15 @@ func (o *Orchestrator) Detect() error {
 		o.EventRepo.AddMany(events)
 		o.loaded = true
 	}
-	// Publish the complete deterministic snapshot. Hold the write lock only for
-	// this assignment: readers must never wait on the LLM stage below.
+	// Publish the complete deterministic snapshot and mark it as a new
+	// generation. Hold the write lock only for these assignments: readers must
+	// never wait on the LLM stage below. Bumping the generation inside the same
+	// critical section as the publish is what makes it a reliable snapshot
+	// marker: any Enrich loop that captured an older generation is thereby known
+	// to be narrating superseded data, no matter how similar the two snapshots
+	// look item by item.
 	o.evidence = built
+	o.generation++
 	o.mu.Unlock()
 	return nil
 }
@@ -112,12 +126,16 @@ func (o *Orchestrator) Detect() error {
 // short write lock. Concurrent readers therefore observe the LLM text appearing
 // progressively instead of waiting for the whole loop to finish.
 //
-// The write-back re-checks the snapshot identity under the write lock. A
-// concurrent reanalysis (POST /api/ai/analyze -> Run -> Detect) can republish a
-// completely different evidence slice while this loop is still running; the
-// index alone is not proof that the item is still the one the narrative was
-// generated for, and an index-only guard would attach one meter's narrative to
-// another meter's anomaly. sameAnomaly supplies that proof.
+// The write-back is guarded by the published snapshot generation, not by the
+// item's identity. A concurrent reanalysis (POST /api/ai/analyze -> Run ->
+// Detect) can republish evidence while this loop is still running, and the new
+// snapshot may carry the very same anomaly identity (meter id and timestamp) at
+// the same index while describing different deterministic values. An
+// identity-only guard would accept that case and attach a narrative generated
+// from the old numbers to a payload that no longer matches it. Comparing
+// generations rejects it: a republish always bumps the counter, so any write
+// from a superseded snapshot is dropped. The invariant is "same published
+// snapshot", not "same anomaly id".
 //
 // Do not "optimize" this by collapsing the loop back under a single lock: that
 // reintroduces the startup stall this split exists to remove.
@@ -128,39 +146,47 @@ func (o *Orchestrator) Enrich() {
 		return
 	}
 	// Snapshot the evidence so the slow LLM calls read stable inputs without
-	// holding any lock. The returned slice is a copy, so the loop cannot race a
+	// holding any lock, and capture the generation that identifies the snapshot
+	// the copy came from. The returned slice is a copy, so the loop cannot race a
 	// concurrent reader while it iterates.
 	snapshot := make([]models.Evidence, len(o.evidence))
 	copy(snapshot, o.evidence)
+	snapshotGeneration := o.generation
 	o.mu.RUnlock()
 
 	for i := range snapshot {
+		// Early exit: once Detect has published a new snapshot, every remaining
+		// narrative in this loop would belong to the superseded one, so there is no
+		// point generating them. This only stops wasted LLM work; the write-back
+		// below is the correctness guard, because a republish can also happen
+		// during the LLM call itself.
+		o.mu.RLock()
+		superseded := o.generation != snapshotGeneration
+		o.mu.RUnlock()
+		if superseded {
+			return
+		}
+
 		txt, err := o.LLM.GenerateExplanation(snapshot[i])
 		if err != nil {
 			continue
 		}
-		// Publish this item's narrative under a short write lock. The bound and
-		// the identity check keep the write safe if Detect republished the
-		// snapshot while this loop was running: the narrative was generated for
-		// snapshot[i], so it may only be written onto the same anomaly that still
-		// lives at index i. When the republished item differs, the narrative is
-		// dropped rather than attached to the wrong meter.
+		// Publish this item's narrative under a short write lock, but only while
+		// the snapshot it was generated from is still the published one. The
+		// generation check closes the window opened by the LLM call above: if a
+		// reanalysis republished evidence in the meantime, this narrative describes
+		// superseded numbers and is discarded.
+		//
+		// When the generation still matches, no republish happened since the
+		// snapshot was copied, so index i provably still holds the very item this
+		// narrative was generated for. No separate anomaly-identity check is needed
+		// or wanted here; the generation is the strictly stronger invariant.
 		o.mu.Lock()
-		if i < len(o.evidence) && sameAnomaly(o.evidence[i], snapshot[i]) {
+		if o.generation == snapshotGeneration {
 			o.evidence[i].LLMText = txt
 		}
 		o.mu.Unlock()
 	}
-}
-
-// sameAnomaly reports whether two evidence records describe the same anomaly.
-//
-// The identity is the pair the API already uses as the composite anomaly id:
-// the meter id and the detection timestamp. Enrich uses it to make sure a
-// narrative is only ever published onto the anomaly it was generated for, even
-// when a concurrent Detect replaced the evidence slice mid-loop.
-func sameAnomaly(a, b models.Evidence) bool {
-	return a.Anomaly.MeterID == b.Anomaly.MeterID && a.Anomaly.Timestamp.Equal(b.Anomaly.Timestamp)
 }
 
 // Run executes the whole pipeline as the deterministic Detect stage followed by

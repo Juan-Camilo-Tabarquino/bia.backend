@@ -312,6 +312,170 @@ func writeTestFile(t *testing.T, path, content string) {
 	}
 }
 
+// snapshotGatedLLM parks only its FIRST GenerateExplanation call and encodes the
+// full deterministic signature of the evidence it was handed into the narrative
+// it returns. Later calls are not gated, so the test can drive a second Enrich
+// to completion while the first one is still parked on its opening call.
+type snapshotGatedLLM struct {
+	firstCall chan models.Evidence // buffered(1): evidence of the first call
+	release   chan struct{}        // closed by the test to unblock the first call
+	once      sync.Once
+}
+
+func newSnapshotGatedLLM() *snapshotGatedLLM {
+	return &snapshotGatedLLM{
+		firstCall: make(chan models.Evidence, 1),
+		release:   make(chan struct{}),
+	}
+}
+
+func (l *snapshotGatedLLM) GenerateExplanation(e models.Evidence) (string, error) {
+	parked := false
+	l.once.Do(func() {
+		parked = true
+		l.firstCall <- e
+	})
+	if parked {
+		<-l.release
+	}
+	return narrativeFromEvidenceSignature(e), nil
+}
+
+// narrativeFromEvidenceSignature encodes the anomaly identity AND the
+// deterministic fields that distinguish two generations of the same anomaly.
+// The narrative only equals the one recomputed from the evidence it sits on when
+// it was generated from that exact deterministic payload, which is what makes a
+// write from a superseded snapshot observable.
+func narrativeFromEvidenceSignature(e models.Evidence) string {
+	return fmt.Sprintf("%s consumption=%.3f delta=%.6f explanation=%q",
+		evidenceIdentity(e), e.Anomaly.Raw.Consumption, e.Anomaly.Delta, e.Explanation)
+}
+
+// TestSupersededSnapshotDoesNotOverwriteSameAnomaly is the regression test for
+// the second half of R3-001. TestCrossAnomalyNarrative only covers the case
+// where the republished snapshot has DIFFERENT anomaly identities at every
+// index; an identity-only write-back guard already rejects that. This test
+// covers the case the identity guard cannot see: two Detect generations publish
+// the SAME anomaly identity (same meter id and timestamp) with CHANGED
+// deterministic fields, so an identity-only guard accepts the stale narrative.
+//
+// The first Enrich is parked on its opening LLM call. While it is parked the
+// source CSV is rewritten so a second Detect publishes the same anomaly with a
+// different consumption/delta/explanation, and that fresh snapshot is enriched
+// to completion. Only then is the parked loop released. Its narrative was
+// generated from a superseded snapshot and must be discarded instead of
+// overwriting the newer narrative that shares its anomaly identity.
+func TestSupersededSnapshotDoesNotOverwriteSameAnomaly(t *testing.T) {
+	dir := t.TempDir()
+	readingsPath := filepath.Join(dir, "readings.csv")
+	eventsPath := filepath.Join(dir, "events.csv")
+	writeTestFile(t, eventsPath, "event_id,event_type,start_time,end_time,description\n")
+
+	const header = "meter_id,timestamp,consumption_kwh,voltage_v,current_a,power_factor,status\n"
+	// Every generation describes one meter with exactly one sustained anomaly at
+	// 2026-09-01 02:00:00. Only the spike magnitude changes, so the meter id and
+	// the timestamp - the composite anomaly id - stay identical while the
+	// deterministic delta and explanation change.
+	writeGeneration := func(spikeKWh float64) {
+		t.Helper()
+		writeTestFile(t, readingsPath, header+
+			"M-SAME,2026-09-01 00:00:00,10,220,45,0.95,OK\n"+
+			"M-SAME,2026-09-01 01:00:00,10,220,45,0.95,OK\n"+
+			fmt.Sprintf("M-SAME,2026-09-01 02:00:00,%.0f,220,45,0.95,OK\n", spikeKWh))
+	}
+
+	llm := newSnapshotGatedLLM()
+	orch := analysis.NewOrchestrator(
+		csv.NewLoader(readingsPath, eventsPath),
+		memory.NewReadingRepo(),
+		memory.NewEventRepo(),
+		analysis.NewQualityChecker(),
+		analysis.NewBaselineCalculator(),
+		analysis.NewAnomalyDetector(),
+		analysis.NewEventCorrelator(),
+		analysis.NewClassifier(),
+		analysis.NewScorer(),
+		llm,
+		analysis.NewEvidenceBuilder(),
+	)
+
+	writeGeneration(30)
+	if err := orch.Detect(); err != nil {
+		t.Fatalf("Detect returned an error: %v", err)
+	}
+	old := orch.Evidence()
+	if len(old) != 1 {
+		t.Fatalf("test setup: expected generation 1 to publish exactly 1 anomaly, got %d", len(old))
+	}
+
+	// Always release the stub so a failed assertion cannot leak the Enrich
+	// goroutine or hang the test binary.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(llm.release) }) }
+	defer release()
+
+	enrichDone := make(chan struct{})
+	go func() {
+		defer close(enrichDone)
+		orch.Enrich()
+	}()
+
+	// Park generation 1's enrichment inside its first LLM call.
+	var parked models.Evidence
+	select {
+	case parked = <-llm.firstCall:
+	case <-time.After(10 * time.Second):
+		t.Fatal("LLM enrichment never entered its first call")
+	}
+
+	// Rewrite the source and republish, exactly as a concurrent
+	// POST /api/ai/analyze -> Run -> Detect would. The new generation keeps the
+	// same anomaly identity but carries different deterministic fields.
+	writeGeneration(40)
+	if err := orch.Detect(); err != nil {
+		t.Fatalf("second Detect returned an error: %v", err)
+	}
+	fresh := orch.Evidence()
+	if len(fresh) != len(old) {
+		t.Fatalf("test setup: expected both generations to publish the same item count, got %d and %d", len(old), len(fresh))
+	}
+	if evidenceIdentity(parked) != evidenceIdentity(fresh[0]) {
+		t.Fatalf("test setup: expected the same anomaly identity across generations, got %s and %s",
+			evidenceIdentity(parked), evidenceIdentity(fresh[0]))
+	}
+	if parked.Anomaly.Delta == fresh[0].Anomaly.Delta {
+		t.Fatalf("test setup: expected the deterministic fields to change across generations, both have delta %.6f",
+			fresh[0].Anomaly.Delta)
+	}
+
+	// Enrich the fresh snapshot to completion while generation 1 stays parked.
+	orch.Enrich()
+	if got := orch.Evidence()[0].LLMText; got != narrativeFromEvidenceSignature(fresh[0]) {
+		t.Fatalf("test setup: fresh enrichment published %q, want %q", got, narrativeFromEvidenceSignature(fresh[0]))
+	}
+
+	// Release generation 1: its write-back must be abandoned because the
+	// snapshot it narrates is no longer the published one.
+	release()
+	select {
+	case <-enrichDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Enrich did not complete")
+	}
+
+	final := orch.Evidence()
+	if len(final) != 1 {
+		t.Fatalf("expected exactly 1 published anomaly, got %d", len(final))
+	}
+	if final[0].LLMText == "" {
+		t.Fatal("the fresh narrative was lost")
+	}
+	if want := narrativeFromEvidenceSignature(final[0]); final[0].LLMText != want {
+		t.Errorf("evidence[0] (%s) carries a narrative generated from a superseded snapshot: got %q, want %q",
+			evidenceIdentity(final[0]), final[0].LLMText, want)
+	}
+}
+
 // TestCrossAnomalyNarrative is the regression test for R3-001. It reproduces a
 // concurrent reanalysis (POST /api/ai/analyze -> Run -> Detect) landing while a
 // background Enrich loop is still in flight, and asserts the invariant that a
