@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/neuralium/ai-energy/internal/ai"
@@ -41,11 +42,29 @@ func main() {
 		quality, baseline, detector, correlator, classifier, scorer, llm, builder)
 
 	router := api.NewRouter(orchestrator)
-	// Run the orchestrator once at startup (ignore error)
-	if err := orchestrator.Run(); err != nil {
+
+	// Run only the fast deterministic stage before serving. It populates the
+	// repositories and publishes the complete anomaly snapshot, so the very
+	// first request already sees correct evidence. A failure here is fatal:
+	// there is no usable data behind the API.
+	if err := orchestrator.Detect(); err != nil {
 		log.Fatalf("failed to load data: %v", err)
 	}
+
 	log.Printf("Server starting on port %d", cfg.ServerPort)
+
+	// The slow LLM enrichment runs in the background so it never delays the
+	// listening socket. It updates each evidence item's narrative under a short
+	// lock, so read endpoints stay responsive while it runs. Unlike Detect, a
+	// failure here must not kill the server: the deterministic payload is
+	// already complete and only the optional llm_analysis text is missing.
+	go func() {
+		start := time.Now()
+		log.Printf("LLM enrichment started")
+		orchestrator.Enrich()
+		log.Printf("LLM enrichment finished in %s", time.Since(start).Round(time.Millisecond))
+	}()
+
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", cfg.ServerPort), router); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
