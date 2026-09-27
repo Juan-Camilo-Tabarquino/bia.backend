@@ -163,10 +163,10 @@ func consumptionNearHourMedian(medians map[models.MeterID]map[int]float64, r mod
 // "not reported" so synthetic readings without electrical data stay clean.
 func electricalInconsistency(r models.Reading) (string, bool) {
 	if r.PowerFactor > 0 && r.PowerFactor < powerFactorMin {
-		return fmt.Sprintf("power factor %.3f below %.2f", r.PowerFactor, powerFactorMin), true
+		return fmt.Sprintf("factor de potencia %.3f por debajo de %.2f", r.PowerFactor, powerFactorMin), true
 	}
 	if r.Voltage > 0 && (r.Voltage < voltageMin || r.Voltage > voltageMax) {
-		return fmt.Sprintf("voltage %.1f V outside [%.0f, %.0f] V", r.Voltage, voltageMin, voltageMax), true
+		return fmt.Sprintf("tensión %.1f V fuera de [%.0f, %.0f] V", r.Voltage, voltageMin, voltageMax), true
 	}
 	return "", false
 }

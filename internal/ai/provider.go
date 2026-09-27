@@ -41,7 +41,9 @@ Explica:
 4. qué debería revisar un operador
 5. qué acciones recomienda
 
-No inventes datos que no estén presentes.`
+No inventes datos que no estén presentes.
+
+Responde únicamente en español.`
 
 // HTTPDoer is the minimal HTTP surface the provider needs. It exists so tests
 // can inject the httptest server client instead of reaching the network.

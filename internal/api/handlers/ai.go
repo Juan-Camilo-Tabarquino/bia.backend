@@ -66,7 +66,7 @@ func AnalysisGET(w http.ResponseWriter, r *http.Request) {
 	// Expected pattern: /ai/analysis/{id}
 	prefix := "/ai/analysis/"
 	if !strings.HasPrefix(path, prefix) {
-		writeJSONError(w, http.StatusNotFound, "analysis not found")
+		writeJSONError(w, http.StatusNotFound, "análisis no encontrado")
 		return
 	}
 	id := strings.TrimPrefix(path, prefix)
@@ -74,7 +74,7 @@ func AnalysisGET(w http.ResponseWriter, r *http.Request) {
 	snapshot, ok := analysisStore[id]
 	storeMutex.Unlock()
 	if !ok {
-		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("analysis %s not found", id))
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("análisis %s no encontrado", id))
 		return
 	}
 	writeJSON(w, http.StatusOK, analysisResultDTO{
@@ -110,7 +110,7 @@ func MeterDetail(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 		path := strings.TrimPrefix(r.URL.Path, "/api")
 		prefix := "/meters/"
 		if !strings.HasPrefix(path, prefix) {
-			writeJSONError(w, http.StatusNotFound, "meter not found")
+			writeJSONError(w, http.StatusNotFound, "medidor no encontrado")
 			return
 		}
 		id := strings.TrimPrefix(path, prefix)
@@ -119,7 +119,7 @@ func MeterDetail(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 		}
 		readings := orchestrator.ReadingRepo.ReadingsFor([]string{id}, nil, nil)
 		if len(readings) == 0 {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("meter %s not found", id))
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("medidor %s no encontrado", id))
 			return
 		}
 		sort.Slice(readings, func(i, j int) bool {
@@ -154,7 +154,7 @@ func AnomalyDetailByID(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 		path := strings.TrimPrefix(r.URL.Path, "/api")
 		prefix := "/anomalies/"
 		if !strings.HasPrefix(path, prefix) {
-			writeJSONError(w, http.StatusNotFound, "anomaly not found")
+			writeJSONError(w, http.StatusNotFound, "anomalía no encontrada")
 			return
 		}
 		id := strings.TrimPrefix(path, prefix)
@@ -164,6 +164,6 @@ func AnomalyDetailByID(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 				return
 			}
 		}
-		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("anomaly %s not found", id))
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("anomalía %s no encontrada", id))
 	}
 }

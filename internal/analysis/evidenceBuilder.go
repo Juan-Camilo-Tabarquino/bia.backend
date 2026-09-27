@@ -36,23 +36,23 @@ func describeEvidence(e models.Evidence) string {
 	switch e.Type {
 	case models.AnomalyDataQuality:
 		if e.Anomaly.Reason != "" {
-			return fmt.Sprintf("Meter %s shows inconsistent electrical readings (%s) while its consumption stays close to the hourly baseline.", meter, e.Anomaly.Reason)
+			return fmt.Sprintf("El medidor %s presenta lecturas eléctricas inconsistentes (%s) mientras su consumo se mantiene cerca de la línea base horaria.", meter, e.Anomaly.Reason)
 		}
-		return fmt.Sprintf("Meter %s shows inconsistent electrical readings while its consumption stays close to the hourly baseline.", meter)
+		return fmt.Sprintf("El medidor %s presenta lecturas eléctricas inconsistentes mientras su consumo se mantiene cerca de la línea base horaria.", meter)
 	case models.AnomalyReal:
-		return fmt.Sprintf("Meter %s consumption is %.1f%% above its baseline with no known operational event.", meter, percent)
+		return fmt.Sprintf("El consumo del medidor %s está %.1f%% por encima de su línea base sin ningún evento operativo conocido.", meter, percent)
 	case models.AnomalyExplainable:
-		return fmt.Sprintf("Meter %s consumption is %.1f%% above its baseline and matches a known operational change: %s.", meter, percent, eventDescription(e.Correlation.Events))
+		return fmt.Sprintf("El consumo del medidor %s está %.1f%% por encima de su línea base y coincide con un cambio operativo conocido: %s.", meter, percent, eventDescription(e.Correlation.Events))
 	case models.AnomalyFalsePositive:
-		return fmt.Sprintf("Meter %s consumption deviation of %.1f%% is explained by planned maintenance: %s.", meter, percent, eventDescription(e.Correlation.Events))
+		return fmt.Sprintf("La desviación del consumo del medidor %s de %.1f%% se explica por mantenimiento planificado: %s.", meter, percent, eventDescription(e.Correlation.Events))
 	default:
-		return fmt.Sprintf("Meter %s shows an unexplained deviation of %.1f%%.", meter, percent)
+		return fmt.Sprintf("El medidor %s presenta una desviación no explicada de %.1f%%.", meter, percent)
 	}
 }
 
 func eventDescription(events []models.Event) string {
 	if len(events) == 0 {
-		return "no event recorded"
+		return "sin evento registrado"
 	}
 	parts := make([]string, 0, len(events))
 	for _, e := range events {
@@ -68,14 +68,14 @@ func eventDescription(events []models.Event) string {
 func recommendAction(anomalyType models.AnomalyType) string {
 	switch anomalyType {
 	case models.AnomalyReal:
-		return "Investigate the meter and its installation."
+		return "Revisar el medidor y su instalación."
 	case models.AnomalyDataQuality:
-		return "Review sensor calibration and the data-quality pipeline for this meter."
+		return "Revisar la calibración del sensor y el proceso de calidad de datos de este medidor."
 	case models.AnomalyExplainable:
-		return "No action required; the deviation matches a registered operational change."
+		return "No se requiere acción; la desviación coincide con un cambio operativo registrado."
 	case models.AnomalyFalsePositive:
-		return "No action required; the deviation is explained by planned maintenance."
+		return "No se requiere acción; la desviación se explica por mantenimiento planificado."
 	default:
-		return "Review the reading before escalating."
+		return "Revisar la lectura antes de escalar."
 	}
 }

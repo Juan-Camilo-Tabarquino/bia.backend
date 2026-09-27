@@ -26,6 +26,55 @@ func TestAnomalyDetector(t *testing.T) {
 	}
 }
 
+// TestElectricalInconsistencyReasonsAreSpanish proves the data-quality
+// trigger details that reach the API's data_quality.reason are neutral
+// Spanish while every numeric verb keeps its original position and precision.
+func TestElectricalInconsistencyReasonsAreSpanish(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     models.Reading
+		want   string
+		broken bool
+	}{
+		{
+			name:   "power factor below threshold",
+			in:     models.Reading{PowerFactor: 0.8},
+			want:   "factor de potencia 0.800 por debajo de 0.85",
+			broken: true,
+		},
+		{
+			name:   "voltage below the nominal band",
+			in:     models.Reading{Voltage: 200},
+			want:   "tensión 200.0 V fuera de [209, 231] V",
+			broken: true,
+		},
+		{
+			name:   "voltage above the nominal band",
+			in:     models.Reading{Voltage: 240, PowerFactor: 0.9},
+			want:   "tensión 240.0 V fuera de [209, 231] V",
+			broken: true,
+		},
+		{
+			name:   "healthy readings",
+			in:     models.Reading{Voltage: 220, PowerFactor: 0.9},
+			want:   "",
+			broken: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, inconsistent := electricalInconsistency(tc.in)
+			if inconsistent != tc.broken {
+				t.Fatalf("electricalInconsistency(%+v) inconsistent = %v, want %v", tc.in, inconsistent, tc.broken)
+			}
+			if got != tc.want {
+				t.Fatalf("electricalInconsistency(%+v) reason = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDetectorPerSignalChanges proves the candidate carries the four signed
 // per-signal changes in percent against the meter baseline, and that a zero
 // baseline mean yields exactly 0 rather than NaN or +/-Inf.
