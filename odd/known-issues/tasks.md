@@ -82,7 +82,7 @@ inexistentes son afirmaciones que se comprobaron con `grep` y `git log -S`.
 El impacto es de credibilidad: un lector o evaluador que abra estos archivos
 recibe información que **contradice** el código que está mirando.
 
-### B1 — `openspec/` describe una arquitectura que no existe
+### B1 — `openspec/` describe una arquitectura que no existe — **RESUELTO** (2026-09-27)
 
 - **Dónde:** `openspec/specs/backend_implementation.sdd.yaml` (`status: draft`,
   versión 0.1.0) y `openspec/config.yaml`.
@@ -96,8 +96,22 @@ recibe información que **contradice** el código que está mirando.
   explícitamente como histórica/abandonada para que nadie la tome como vigente.
 - **Ojo:** hay que decidir **qué** hacer con ella antes de reescribirla. La spec
   está en `draft` y nunca se completó.
+- **Commit:** `_pendiente_`.
+- **Hechos corregidos:** ni la spec ni `config.yaml` afirman ya una arquitectura
+  vigente. La spec conserva **intacto** su contenido arquitectónico y su
+  `status: draft` (no se tocó el enum), pero lleva un banner
+  histórico/abandonado como comentario YAML al inicio y una línea equivalente en
+  su `## overview`, apuntando a `docs/architecture.md` y `docs/endpoints.md`
+  como fuentes vigentes. Se comprobó que **ningún** código ni config del repo
+  lee el campo `status:`. En `openspec/config.yaml` se reemplazaron los cinco
+  ejemplos muertos de `internal\domain\services\*_test.go` por tests reales de
+  hoy (`internal/analysis/`, `internal/api/`, etc.).
+- **Qué cambió:** se marcó la spec como histórica sin reescribirla, y se
+  corrigieron las rutas de evidencia de tests en `openspec/config.yaml`. El
+  conteo `Test-like files detected (5)` se dejó igual a propósito: parece
+  generado por tooling y hoy hay 14 archivos `*_test.go` en `internal/`.
 
-### B2 — `docs/backend-implementation-plan.md` especifica `/api/v1/*`
+### B2 — `docs/backend-implementation-plan.md` especifica `/api/v1/*` — **RESUELTO** (2026-09-27)
 
 - **Dónde:** `docs/backend-implementation-plan.md:159-163`.
 - **Qué está mal:** documenta cinco rutas `/api/v1/...` que **no existen**. El
@@ -106,6 +120,20 @@ recibe información que **contradice** el código que está mirando.
 - **Este es el archivo donde vive `/api/v1`**, no `openspec/` (ver B1).
 - **Terminado significa:** el plan apunta al prefijo `/api` real, o marca
   claramente que `/api/v1` era la intención original y no se implementó.
+- **Commit:** `_pendiente_`.
+- **Hechos corregidos:** las cinco entradas de
+  `docs/backend-implementation-plan.md:159-163` ahora usan el prefijo real
+  `/api`; la quinta pasó de `/api/v1/anomalies/{meter_id}` a
+  `/api/anomalies/{id}`, porque el path var es el **id estable de la anomalía**,
+  no un `meter_id` (ver `docs/endpoints.md` y
+  `internal/api/handlers/ai.go`). Se agregó una nota en inglés que registra que
+  `/api/v1` fue la intención original y nunca se implementó, y apunta a
+  `docs/endpoints.md`. Auditoría del resto del archivo: no hay ninguna otra
+  referencia a `/api/v1` ni a esas cinco rutas. Se mantiene el hallazgo
+  original: el token `/api/v1` vive en este plan y **no** en `openspec/`.
+- **Qué cambió:** el prefijo `/api/v1` → `/api` en las cinco rutas, el path var
+  de la ruta de detalle de anomalía, y una nota de intención original. No se
+  modernizó nada más del plan.
 
 ### B3 — `docs/routing.md:35` muestra una firma vieja — **RESUELTO** (2026-09-27)
 

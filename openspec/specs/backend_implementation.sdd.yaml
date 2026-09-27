@@ -1,3 +1,16 @@
+# =====================================================================
+# HISTORICAL / ABANDONED — DO NOT USE AS A SOURCE OF TRUTH
+# ---------------------------------------------------------------------
+# This is an uncompleted draft (version 0.1.0, status: draft) that was
+# never built. It describes an architecture that was NOT implemented:
+# a chi router in internal/api/routes/, an LLM client in
+# internal/ai/agents/, and tests in internal/domain/services/ — none of
+# those directories exist. The current architecture is
+# docs/architecture.md and the current HTTP contract is docs/endpoints.md.
+# The technical content below is kept only as a historical record. It has
+# deliberately been left untouched and must not be treated as current.
+# =====================================================================
+
 # Backend Implementation SDD Spec
 
 ## metadata
@@ -8,6 +21,8 @@
 - status: draft
 
 ## overview
+**HISTORICAL / ABANDONED — this uncompleted draft describes an architecture that was never implemented; see `docs/architecture.md` and `docs/endpoints.md` and do not use this file as a source of truth.**
+
 This OpenSpec specification describes the design and implementation plan for the **AI Energy Management Platform – Backend**. The backend loads meter readings and operational events from CSV files, runs a deterministic analytical pipeline, and produces explainable evidence that is interpreted by an LLM. Results are exposed via a lightweight REST API.
 
 ## goals

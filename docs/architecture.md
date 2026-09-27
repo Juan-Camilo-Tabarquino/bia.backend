@@ -765,15 +765,6 @@ Se listan porque son reales y están verificadas, no por completitud formal.
   de enum en inglés (`CONSUMPTION_SPIKE`). Son claves y tokens, no prosa; pero un
   consumidor de ese endpoint ve una forma distinta a la de `/api/anomalies`.
 
-**En la documentación:**
-
-- **`openspec/` está desactualizado**: nombra chi y directorios que no existen
-  (`internal/ai/agents/`, `internal/api/routes/`). La spec sigue en
-  `status: draft`.
-- **`docs/backend-implementation-plan.md` especifica `/api/v1/*`**, rutas que no
-  existen y que el código rechaza a propósito. (Ojo: el token `/api/v1` aparece
-  en este plan, **no** en `openspec/`.)
-
 **En el arranque:**
 
 - **El arranque no bloquea, pero el puerto no tiene señal de readiness**: el
