@@ -111,16 +111,24 @@ Out of scope (reported, not implemented):
 - `docs/architecture.md` §13: the documentation bullets for the two files above
   stop being true once they are corrected.
 
-### WU4 — Drift B1/B2 and ODD bookkeeping
+### WU4 — Drift B1/B2 under the chosen policy
 
-- `openspec/specs/backend_implementation.sdd.yaml`: historical/abandoned status
-  banner pointing at `docs/architecture.md`.
+- `openspec/specs/backend_implementation.sdd.yaml`: historical/abandoned warning;
+  content and `status:` field deliberately untouched.
+- `openspec/config.yaml`: dead test-evidence paths replaced by real test files.
 - `docs/backend-implementation-plan.md:159-163`: real `/api` prefix, corrected
   fifth-route label (anomaly id, not `meter_id`), and the original-intent note.
+- `docs/architecture.md` §13: the two remaining documentation bullets and the
+  group heading they would otherwise leave behind empty.
+
+### WU5 — ODD bookkeeping
+
 - `odd/review-backend-plan/tasks.md`, `odd/create-backend-sdd-spec/tasks.md`,
   `odd/spanish-analysis-texts/tasks.md`: bookkeeping aligned with the verified
   repository state.
-- `odd/known-issues/tasks.md`: an index entry for the three inherited open items.
+- `odd/known-issues/tasks.md`: group A closed with the recovered verdicts, every
+  resolved item linked to its commit, and the debts that only `docs/architecture.md`
+  knew about (C4-C7) indexed so the two documents finally agree.
 
 ## Verification plan
 
@@ -135,7 +143,33 @@ Out of scope (reported, not implemented):
 
 | Work unit | Commit | Checks | Evidence |
 | --- | --- | --- | --- |
-| WU1 | _pending_ | _pending_ | _pending_ |
-| WU2 | _pending_ | _pending_ | _pending_ |
-| WU3 | _pending_ | _pending_ | _pending_ |
-| WU4 | _pending_ | _pending_ | _pending_ |
+| WU1 | `3051333` | `go build ./...`, `go vet ./...`, `go test ./... -count=1` (8/8 packages ok) | RED reproduced against the pre-fix code in a throwaway copy with the guard deleted: `StdDev:NaN` and `GET /api/anomalies returned an empty body` |
+| WU2 | `c65ab53` | every claim re-read against `git show 3051333` | §5.2/§9/§11 rewritten, §13 single-reading debt deleted, C1 closed in the backlog |
+| WU3 | `75a4741` | every `Source:` reference re-read at its target line | routing.md signature and health location; endpoints.md from 10 to 18 documented fields |
+| WU4 | `e713860` | spec content diffed to prove it is unchanged; `grep -rn "api/v1"` | historical warning, plan prefix corrected, §13 documentation group removed |
+| WU5 | `0b99064` | `grep -rn "_pendiente_" odd/` returns nothing | group A closed, C4-C7 indexed, suggested order rewritten |
+
+## Review and residual risk
+
+The code change was independently verified by a separate read-only verifier, which
+reproduced the pre-fix failure by deleting the guard in a copy of the repository
+outside the working tree, and reported the change verified and non-blocking. Its
+residual findings became items C4 and C5 of the backlog and two bullets of
+`docs/architecture.md` §13: non-finite input still reaches the JSON encoders
+because `strconv.ParseFloat` accepts `NaN`/`Inf`, and both handlers discard the
+`json.Marshal` error, so a non-finite value answers `200` with an empty body
+instead of failing loudly. Neither is fixed here.
+
+`go test -race ./...` could NOT be run on this host: the race detector requires
+cgo and no C compiler is installed (`go env CGO_ENABLED` is `0`, `gcc` is absent
+from `PATH`). Race safety therefore rests on the lock discipline being a copy of
+the existing `Evidence()` pattern, not on a measured result. This is the one
+unmet check of the feature.
+
+Native review: `gentle_review` inspect scoped the candidate to
+`sha256:764df626a3fb5027e934107b4f99654ebb25a8ca383ab5d1f8eafa2f4cea3b6b`
+(10 paths, risk `medium`, 532 changed lines) and offered an ordinary START. The
+START returned a **candidate-scoped consent decline**, so no lineage was created
+and no mutation was performed. The candidate therefore stands unreviewed pending a
+human decision; delivery (commit is on the branch, but push, PR and merge) remains
+an ordinary repository decision.
