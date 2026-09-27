@@ -26,7 +26,7 @@ type Orchestrator struct {
 	LLM             LLMClient
 	EvidenceBuilder EvidenceBuilder
 
-	// mu protects evidence/loaded/generation. It is held only for short
+	// mu protects evidence/dataGaps/loaded/generation. It is held only for short
 	// mutations and brief reads: Detect publishes the deterministic snapshot
 	// under a short write lock and Enrich writes each LLM narrative under a
 	// short write lock per item. It is deliberately NOT held across the slow LLM
@@ -34,6 +34,10 @@ type Orchestrator struct {
 	// the enrichment.
 	mu       sync.RWMutex
 	evidence []models.Evidence
+	// dataGaps holds the meters that survived the quality check but could not be
+	// validated (too few readings for a baseline). They are published with the
+	// same snapshot as evidence and are never anomalies. Protected by mu.
+	dataGaps []DataGap
 	loaded   bool
 	// generation is a monotonically increasing counter bumped every time Detect
 	// publishes a new evidence snapshot. It identifies the snapshot as a whole,
@@ -86,6 +90,10 @@ func (o *Orchestrator) Detect() error {
 	// scoring; it only narrates the result later, in Enrich.
 	good := o.QualityChecker.Check(readings)
 	baseline := o.BaselineCalc.Calculate(good)
+	// A meter with no baseline entry survived the quality check but had too few
+	// readings to be validated. Computing the gaps here, once per Detect, keeps
+	// them part of the same deterministic snapshot as the evidence.
+	gaps := dataGapsFor(good, baseline)
 	candidates := o.Detector.Detect(good, baseline)
 	correlated := o.Correlator.Correlate(candidates, events)
 	classified := o.Classifier.Classify(correlated)
@@ -108,6 +116,7 @@ func (o *Orchestrator) Detect() error {
 	// to be narrating superseded data, no matter how similar the two snapshots
 	// look item by item.
 	o.evidence = built
+	o.dataGaps = gaps
 	o.generation++
 	o.mu.Unlock()
 	return nil
@@ -208,5 +217,16 @@ func (o *Orchestrator) Evidence() []models.Evidence {
 	defer o.mu.RUnlock()
 	out := make([]models.Evidence, len(o.evidence))
 	copy(out, o.evidence)
+	return out
+}
+
+// DataGaps returns a copy of the last run's unvalidated meters so callers cannot
+// mutate the orchestrator's internal state or observe a partially written slice.
+// A data gap is not an anomaly: it never appears in Evidence().
+func (o *Orchestrator) DataGaps() []DataGap {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	out := make([]DataGap, len(o.dataGaps))
+	copy(out, o.dataGaps)
 	return out
 }

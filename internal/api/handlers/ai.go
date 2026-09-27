@@ -90,11 +90,28 @@ func AnalysisGET(w http.ResponseWriter, r *http.Request) {
 // GET /api/dashboard/summary – provide a high‑level summary for the UI.
 func DashboardSummary(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		gaps := orchestrator.DataGaps()
+		// meterIDs stays non-nil even with no gaps, so the JSON field is [] and
+		// never null and clients never have to branch on a missing array.
+		meterIDs := make([]string, 0, len(gaps))
+		for _, gap := range gaps {
+			meterIDs = append(meterIDs, gap.MeterID)
+		}
 		summary := map[string]any{
 			"health":    "ok",
 			"meters":    len(orchestrator.ReadingRepo.AllMeterIDs()),
 			"anomalies": len(orchestrator.Evidence()),
 			"lastRun":   "latest", // placeholder
+			// unvalidatedMeters reports the meters that survived the quality
+			// check but could not be validated (too few readings for a baseline).
+			// The key is ALWAYS present, even with a count of 0, so the response
+			// shape is stable. These meters are deliberately absent from
+			// /api/anomalies: a data gap is not an anomaly.
+			"unvalidatedMeters": map[string]any{
+				"count":  len(gaps),
+				"meters": meterIDs,
+				"reason": analysis.InsufficientReadingsReason,
+			},
 		}
 		writeJSON(w, http.StatusOK, summary)
 	}
