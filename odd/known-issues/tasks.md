@@ -1,0 +1,220 @@
+# Backlog: pendientes conocidos de bia.backend
+
+**Creado:** 2026-09-27 · **Estado de `main` al crearlo:** `4487840`
+**Compañero de lectura:** `docs/architecture.md`, sección 13 (las mismas deudas,
+en versión resumida y de cara al lector del repo)
+
+## Cómo usar este archivo
+
+No es un plan de ejecución ni una feature en curso: es una **lista de pendientes
+conocidos** para retomar más adelante. Cada item es **independiente** — se puede
+tomar uno solo sin tocar los demás.
+
+Cuando agarres un item, el camino recomendado es **convertirlo en su propia
+feature** con su `odd/<nombre>/tasks.md`, su rama, sus work units y su
+verificación. Este archivo queda entonces como el índice de dónde salió.
+
+Cada item declara: qué está mal, dónde exactamente, por qué importa, qué
+significaría darlo por terminado, cómo verificarlo, y **qué está verificado y qué
+no**. Esa última parte es la importante: los tres grupos tienen niveles de
+evidencia distintos, y confundirlos es la forma más rápida de trabajar de más.
+
+| Grupo | Naturaleza | Evidencia |
+|---|---|---|
+| A | Hallazgos del reviewer nativo | **No verificado**: el envelope no trae los claims |
+| B | Drift documental | Verificado contra el código y los archivos |
+| C | Robustez del código | Verificado por lectura del código, sin disparador en el dataset |
+
+---
+
+## Grupo A — Hallazgos advisory del review nativo
+
+**Origen:** review del slice `review-c9ab19ba7248651a` (`feat/spanish-analysis-texts`,
+tier medium, 18 archivos, 1 lens `review-reliability`), cerrado **aprobado** sin
+corrección requerida.
+
+El envelope de cierre declara textualmente que **los tres son no bloqueantes** y
+están dispositionados como `informational`: *"none opened a correction, none
+reopens this review... Treat them as separate later work, never as a reason to
+re-run review on this candidate."*
+
+### A0 — Primer paso obligatorio: recuperar los claims
+
+**Qué está mal:** no lo sabemos. El envelope de cierre trae **id, severidad y
+ubicación**, pero **no el texto** de cada hallazgo, y un `STATUS` posterior
+tampoco los expone.
+
+**Por qué importa:** sin los claims no se puede evaluar si cada hallazgo es real.
+Cualquier trabajo sobre A1–A3 empieza por reconstruirlos leyendo el código en la
+ubicación señalada y preguntándose qué vería un revisor de confiabilidad ahí.
+
+**Cómo:** leer el código en las tres ubicaciones, listar las propiedades
+sospechosas, y **clasificar cada hallazgo como real o descartable con evidencia**.
+Si resultan descartables, cerrar A1–A3 de una y documentar por qué.
+
+**Hecho significa:** cada uno de A1–A3 tiene claim reconstruido, veredicto
+(real / descartable) y evidencia.
+
+### A1 — `internal/analysis/orchestrator.go:84-93` · severidad `WARNING`
+
+Zona: el cuerpo de `Detect`, donde corre el pipeline determinístico y después se
+publica bajo lock.
+
+### A2 — `cmd/api/main.go:61-66` · severidad `WARNING`
+
+Zona: la goroutine que lanza `Enrich()` en segundo plano. Sospecha razonable a
+investigar: **qué pasa si `Enrich` falla o el proceso recibe una señal mientras
+corre** — hoy no hay manejo de error en esa goroutine.
+
+### A3 — `data/events.csv:2-5` · severidad `SUGGESTION`
+
+Zona: las cuatro descripciones de eventos. Es un `SUGGESTION` sobre datos, no
+sobre código. Sospecha razonable: las descripciones están **incrustadas** en el
+`reason` determinístico vía el join de `evidenceBuilder.go`, así que un cambio de
+dataset altera el texto de la API.
+
+---
+
+## Grupo B — Drift documental
+
+Todo verificado contra el código. El token `/api/v1` y los directorios
+inexistentes son afirmaciones que se comprobaron con `grep` y `git log -S`.
+El impacto es de credibilidad: un lector o evaluador que abra estos archivos
+recibe información que **contradice** el código que está mirando.
+
+### B1 — `openspec/` describe una arquitectura que no existe
+
+- **Dónde:** `openspec/specs/backend_implementation.sdd.yaml` (`status: draft`,
+  versión 0.1.0) y `openspec/config.yaml`.
+- **Qué dice mal:** chi como router (`:30` `internal/api/routes/ → chi router
+  wiring`), `internal/ai/agents/` (`:28`), y evidencia de tests en
+  `internal/domain/services/` (`openspec/config.yaml`), directorio **borrado**.
+- **Qué NO contiene:** el token `/api/v1`. Verificado con `grep -rn "v1"
+  openspec/` (sin resultados) y `git log --all -S"/api/v1" -- openspec` (vacío).
+  Las rutas que lista son **sin prefijo** (`:55` `GET /health`).
+- **Terminado significa:** la spec refleja la arquitectura real, o se la marca
+  explícitamente como histórica/abandonada para que nadie la tome como vigente.
+- **Ojo:** hay que decidir **qué** hacer con ella antes de reescribirla. La spec
+  está en `draft` y nunca se completó.
+
+### B2 — `docs/backend-implementation-plan.md` especifica `/api/v1/*`
+
+- **Dónde:** `docs/backend-implementation-plan.md:159-163`.
+- **Qué está mal:** documenta cinco rutas `/api/v1/...` que **no existen**. El
+  código no tiene v1, lo rechaza a propósito y hay un test que lo fija
+  (`internal/api/api_test.go`, `TestRouterRegistersOnlyAPIPrefixedRoutes`).
+- **Este es el archivo donde vive `/api/v1`**, no `openspec/` (ver B1).
+- **Terminado significa:** el plan apunta al prefijo `/api` real, o marca
+  claramente que `/api/v1` era la intención original y no se implementó.
+
+### B3 — `docs/routing.md:35` muestra una firma vieja
+
+- **Dónde:** `docs/routing.md:35`.
+- **Qué dice:** `func NewRouter(orchestrator *analysis.Orchestrator, port int) http.Handler`.
+- **La verdad:** `internal/api/router.go:33` es
+  `func NewRouter(orchestrator *analysis.Orchestrator) http.Handler`. **El
+  parámetro `port` ya no existe**; se eliminó en la limpieza de código muerto y
+  el doc no se actualizó.
+- **Terminado significa:** la firma del doc coincide con la del código.
+
+### B4 — `docs/endpoints.md` sub-documenta el DTO de anomalía
+
+- **Dónde:** el ejemplo de `GET /api/anomalies` en `docs/endpoints.md`.
+- **Qué está mal:** muestra **10** campos y el código emite **18**. Faltan
+  exactamente: `priority`, `baseline`, los cuatro `*_change_pct`
+  (`consumption_`, `voltage_`, `current_`, `power_factor_`), `correlated_events`
+  y `data_quality`.
+- **Consecuencia real:** un frontend que se guíe por este doc va a ignorar los
+  campos que sí recibe, y el detalle de la anomalía queda peor de lo que podría.
+- **Además:** varias referencias `archivo:línea` del doc están corridas respecto
+  del código.
+- **Terminado significa:** el ejemplo lista los 18 campos con sus tipos, y las
+  referencias de línea resuelven.
+
+---
+
+## Grupo C — Robustez del código
+
+### C1 — Varianza sin guarda para una sola lectura
+
+- **Dónde:** `internal/analysis/baseline.go:67` —
+  `variance := varSum / float64(cnt-1)`.
+- **Qué pasa:** con `cnt == 1`, el denominador es `0` y el desvío estándar sale
+  **no finito** (`+Inf` o `NaN`). No hay guarda en esa etapa, y `Detect` solo
+  protege `b.Mean == 0` (`detector.go:58`), no un `StdDev` no finito.
+- **Por qué importa:** un medidor con una sola lectura —caso plausible con datos
+  reales, no con este dataset— deja el detector comparando contra un desvío
+  infinito. Las reglas de pico y caída usan `b.StdDev`, así que el
+  comportamiento pasa a ser indefinido.
+- **Estado de verificación:** verificado por lectura del código. **No hay
+  disparador en el dataset** (todos los medidores tienen 336 lecturas) y **no hay
+  test que lo cubra**.
+- **Terminado significa:** decisión explícita sobre qué debería pasar
+  (¿descartar el medidor?, ¿`StdDev = 0`?) implementada **y** un test que la fije.
+  Si se decide no hacer nada, documentarlo como decisión, no dejarlo implícito.
+- **Riesgo de la corrección:** tocar la línea base puede mover los resultados de
+  los 4 casos benchmark. El test de regresión del dataset
+  (`internal/analysis/requirements_dataset_test.go`) es la red de seguridad, y
+  hay que correrlo antes y después.
+
+### C2 — La prosa del clasificador ignora el signo de la desviación
+
+- **Dónde:** `internal/analysis/evidenceBuilder.go:43` y `:45`.
+- **Qué pasa:** las plantillas de `REAL_ANOMALY` y `EXPLAINABLE_ANOMALY` dicen
+  siempre **"por encima de"**, incluso si la anomalía se originó en una **caída**
+  (`delta` negativo).
+- **Por qué es latente y no visible:** con el dataset actual esos dos tipos
+  **solo surgen de picos**. Una caída cae en `CONSUMPTION_DROP`, y si no tiene
+  evento explicativo el clasificador la manda a `REAL_ANOMALY`, cuyo texto diría
+  "está X% por encima de su línea base" con un X negativo. O sea: el bug está
+  esperando a que alguien use otro dataset.
+- **Terminado significa:** el texto refleja el signo real (por encima / por
+  debajo), con un test que cubra una caída clasificada como real.
+- **Ojo:** cambiar estas plantillas toca texto que hoy está fijado por tests de
+  igualdad exacta. Hay que actualizarlos en el mismo commit, no antes.
+
+### C3 — `/api/reports` expone el modelo de dominio crudo
+
+- **Dónde:** `internal/api/router.go:106-121`.
+- **Qué pasa:** serializa `models.Evidence` directamente, así que sus claves JSON
+  son **nombres de campo Go** (`MeterID`, `Baseline`, `Correlation`) y expone el
+  enum `Kind` en inglés (`CONSUMPTION_SPIKE`), a diferencia de `/api/anomalies`,
+  que usa DTOs con claves en snake_case.
+- **Por qué está acá y no en el grupo B:** **no es un bug de documentación**, es
+  una decisión de producto sin tomar. Las claves en inglés son contrato técnico y
+  no deberían traducirse; la pregunta abierta es si este endpoint debería existir
+  con esta forma o reusar el DTO de anomalías.
+- **Terminado significa:** una decisión explícita. Si se deja como está, conviene
+  que `docs/endpoints.md` lo diga de forma prominente para que nadie asuma que
+  comparte la forma de `/api/anomalies`.
+
+---
+
+## Orden sugerido
+
+Si hay que elegir, el que más rinde por esfuerzo es **B4**, y después **C1**.
+
+1. **A0** primero, porque desbloquea (o cierra) todo el grupo A y no requiere
+   escribir código.
+2. **B4** — el impacto es real para el frontend, el arreglo es acotado y es puro
+   texto.
+3. **C1** — es el único bug latente del grupo C, pero **requiere decidir la
+   semántica** antes de tocar nada, y su corrección puede mover los resultados
+   benchmark.
+4. **B1/B2/B3** — juntos, porque son el mismo tipo de trabajo y comparten
+   decisión de política ("¿qué hacemos con los documentos históricos?").
+5. **C2** — barato, pero conviene esperar a tener un caso que lo dispare o a
+   tocarlo por otro motivo.
+6. **C3** — es una decisión de producto; no hay trabajo técnico hasta que se
+   tome.
+
+## Fuera de alcance de este backlog
+
+- Los tres PRs (`#1`, `#2`, `#3`) están mergeados y `main` está al día.
+- La traducción al español de la superficie de análisis **está hecha y
+  verificada**; no queda texto inglés en campos visibles de usuario. Lo que
+  queda en inglés son tokens de contrato, claves JSON y el body de `README.md`,
+  y en los tres casos es deliberado.
+- Las narrativas del LLM: un modelo en vivo no es determinista. La instrucción de
+  idioma del prompt eleva la probabilidad de español pero no la garantiza, y eso
+  es una propiedad del modelo, no una deuda del repo.
