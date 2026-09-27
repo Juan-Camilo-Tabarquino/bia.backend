@@ -1,6 +1,8 @@
 package analysis_test
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -263,6 +265,160 @@ func TestEnrichToleratesNilLLM(t *testing.T) {
 	for _, e := range evidence {
 		if e.LLMText != "" {
 			t.Fatalf("nil LLM unexpectedly produced text: %q", e.LLMText)
+		}
+	}
+}
+
+// identityGatedLLM is a gated LLM double that parks the enrichment loop inside
+// its first GenerateExplanation call and reports the exact evidence it was
+// handed. The narrative it returns encodes that evidence's identity, so a
+// narrative that lands on a different anomaly is detectable by exact string
+// comparison instead of by guessing.
+type identityGatedLLM struct {
+	firstCall chan models.Evidence // buffered(1): evidence of the first call
+	release   chan struct{}        // closed by the test to unblock every call
+	once      sync.Once
+}
+
+func newIdentityGatedLLM() *identityGatedLLM {
+	return &identityGatedLLM{
+		firstCall: make(chan models.Evidence, 1),
+		release:   make(chan struct{}),
+	}
+}
+
+func (l *identityGatedLLM) GenerateExplanation(e models.Evidence) (string, error) {
+	l.once.Do(func() { l.firstCall <- e })
+	<-l.release
+	return narrativeForEvidence(e), nil
+}
+
+// narrativeForEvidence encodes the anomaly identity into the narrative itself,
+// which is what makes a cross-anomaly write observable.
+func narrativeForEvidence(e models.Evidence) string {
+	return "narrative for " + evidenceIdentity(e)
+}
+
+// evidenceIdentity is the composite id the API already uses for an anomaly:
+// meter id plus detection timestamp.
+func evidenceIdentity(e models.Evidence) string {
+	return fmt.Sprintf("%s@%s", e.Anomaly.MeterID, e.Anomaly.Timestamp.Format(time.RFC3339))
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write %s: %v", path, err)
+	}
+}
+
+// TestCrossAnomalyNarrative is the regression test for R3-001. It reproduces a
+// concurrent reanalysis (POST /api/ai/analyze -> Run -> Detect) landing while a
+// background Enrich loop is still in flight, and asserts the invariant that a
+// non-empty narrative must belong to the anomaly it sits on.
+//
+// The enrichment loop is parked inside its first LLM call, the evidence slice is
+// then republished from a second dataset whose items have different identities
+// at every index, and only then is the loop released. On the pre-fix code the
+// index-only length guard lets the write-back land, so the narrative generated
+// for M-OLD is stored on M-NEW and the invariant below fails.
+func TestCrossAnomalyNarrative(t *testing.T) {
+	dir := t.TempDir()
+	readingsOld := filepath.Join(dir, "readings_old.csv")
+	readingsNew := filepath.Join(dir, "readings_new.csv")
+	eventsPath := filepath.Join(dir, "events.csv")
+
+	const header = "meter_id,timestamp,consumption_kwh,voltage_v,current_a,power_factor,status\n"
+	// Both datasets have the same shape and therefore produce the same number of
+	// evidence items in the same order, but they describe different meters on
+	// different days. Item i of the new snapshot is never item i of the old one,
+	// so any narrative carried over by index is provably mismatched.
+	writeTestFile(t, readingsOld, header+
+		"M-OLD,2026-09-01 00:00:00,10,220,45,0.95,OK\n"+
+		"M-OLD,2026-09-01 01:00:00,10,220,45,0.95,OK\n"+
+		"M-OLD,2026-09-01 02:00:00,100,220,45,0.95,OK\n")
+	writeTestFile(t, readingsNew, header+
+		"M-NEW,2026-09-02 00:00:00,10,220,45,0.95,OK\n"+
+		"M-NEW,2026-09-02 01:00:00,10,220,45,0.95,OK\n"+
+		"M-NEW,2026-09-02 02:00:00,100,220,45,0.95,OK\n")
+	writeTestFile(t, eventsPath, "event_id,event_type,start_time,end_time,description\n")
+
+	llm := newIdentityGatedLLM()
+	orch := analysis.NewOrchestrator(
+		csv.NewLoader(readingsOld, eventsPath),
+		memory.NewReadingRepo(),
+		memory.NewEventRepo(),
+		analysis.NewQualityChecker(),
+		analysis.NewBaselineCalculator(),
+		analysis.NewAnomalyDetector(),
+		analysis.NewEventCorrelator(),
+		analysis.NewClassifier(),
+		analysis.NewScorer(),
+		llm,
+		analysis.NewEvidenceBuilder(),
+	)
+
+	if err := orch.Detect(); err != nil {
+		t.Fatalf("Detect returned an error: %v", err)
+	}
+	old := orch.Evidence()
+	if len(old) == 0 {
+		t.Fatal("the first dataset published no evidence")
+	}
+
+	// Always release the stub so a failed assertion cannot leak the Enrich
+	// goroutine or hang the test binary.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(llm.release) }) }
+	defer release()
+
+	enrichDone := make(chan struct{})
+	go func() {
+		defer close(enrichDone)
+		orch.Enrich()
+	}()
+
+	// Park the enrichment loop inside its first LLM call. It is blocked before
+	// any write-back, so the evidence is still the old snapshot.
+	var parked models.Evidence
+	select {
+	case parked = <-llm.firstCall:
+	case <-time.After(10 * time.Second):
+		t.Fatal("LLM enrichment never entered its first call")
+	}
+
+	// While the loop is parked, republish a different evidence slice, exactly as
+	// a concurrent POST /api/ai/analyze would through Run -> Detect.
+	orch.Loader.ReadingsPath = readingsNew
+	if err := orch.Detect(); err != nil {
+		t.Fatalf("second Detect returned an error: %v", err)
+	}
+	fresh := orch.Evidence()
+	if len(fresh) != len(old) {
+		t.Fatalf("test setup: expected both datasets to publish the same item count, got %d and %d", len(old), len(fresh))
+	}
+	if evidenceIdentity(parked) == evidenceIdentity(fresh[0]) {
+		t.Fatalf("test setup: republished item 0 (%s) equals the parked item, so no mismatch is reproducible", evidenceIdentity(fresh[0]))
+	}
+
+	// Release the loop: every snapshotted item now attempts its write-back.
+	release()
+	select {
+	case <-enrichDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Enrich did not complete")
+	}
+
+	// The invariant: a non-empty narrative must have been generated for the very
+	// anomaly it is attached to, never for the one that used to sit at that index.
+	final := orch.Evidence()
+	for i, e := range final {
+		if e.LLMText == "" {
+			continue
+		}
+		if want := narrativeForEvidence(e); e.LLMText != want {
+			t.Errorf("evidence[%d] (%s) carries a narrative generated for a different anomaly: got %q, want %q (or empty)",
+				i, evidenceIdentity(e), e.LLMText, want)
 		}
 	}
 }

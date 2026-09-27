@@ -112,6 +112,13 @@ func (o *Orchestrator) Detect() error {
 // short write lock. Concurrent readers therefore observe the LLM text appearing
 // progressively instead of waiting for the whole loop to finish.
 //
+// The write-back re-checks the snapshot identity under the write lock. A
+// concurrent reanalysis (POST /api/ai/analyze -> Run -> Detect) can republish a
+// completely different evidence slice while this loop is still running; the
+// index alone is not proof that the item is still the one the narrative was
+// generated for, and an index-only guard would attach one meter's narrative to
+// another meter's anomaly. sameAnomaly supplies that proof.
+//
 // Do not "optimize" this by collapsing the loop back under a single lock: that
 // reintroduces the startup stall this split exists to remove.
 func (o *Orchestrator) Enrich() {
@@ -132,15 +139,28 @@ func (o *Orchestrator) Enrich() {
 		if err != nil {
 			continue
 		}
-		// Publish this item's narrative under a short write lock. The length
-		// guard keeps the write safe if Detect republished the snapshot while
-		// this loop was running.
+		// Publish this item's narrative under a short write lock. The bound and
+		// the identity check keep the write safe if Detect republished the
+		// snapshot while this loop was running: the narrative was generated for
+		// snapshot[i], so it may only be written onto the same anomaly that still
+		// lives at index i. When the republished item differs, the narrative is
+		// dropped rather than attached to the wrong meter.
 		o.mu.Lock()
-		if i < len(o.evidence) {
+		if i < len(o.evidence) && sameAnomaly(o.evidence[i], snapshot[i]) {
 			o.evidence[i].LLMText = txt
 		}
 		o.mu.Unlock()
 	}
+}
+
+// sameAnomaly reports whether two evidence records describe the same anomaly.
+//
+// The identity is the pair the API already uses as the composite anomaly id:
+// the meter id and the detection timestamp. Enrich uses it to make sure a
+// narrative is only ever published onto the anomaly it was generated for, even
+// when a concurrent Detect replaced the evidence slice mid-loop.
+func sameAnomaly(a, b models.Evidence) bool {
+	return a.Anomaly.MeterID == b.Anomaly.MeterID && a.Anomaly.Timestamp.Equal(b.Anomaly.Timestamp)
 }
 
 // Run executes the whole pipeline as the deterministic Detect stage followed by
