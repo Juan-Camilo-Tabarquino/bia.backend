@@ -21,8 +21,8 @@ evidencia distintos, y confundirlos es la forma más rápida de trabajar de más
 
 | Grupo | Naturaleza | Evidencia |
 |---|---|---|
-| A | Hallazgos del reviewer nativo | **No verificado**: el envelope no trae los claims |
-| B | Drift documental | Verificado contra el código y los archivos |
+| A | Hallazgos del reviewer nativo | **Recuperados y descartados** (2026-09-27): el envelope no traía los claims, se reconstruyeron y los tres resultaron descartables |
+| B | Drift documental | Verificado contra el código y los archivos — cerrado con B1-B4 |
 | C | Robustez del código | Verificado por lectura del código, sin disparador en el dataset |
 
 ---
@@ -55,10 +55,25 @@ Si resultan descartables, cerrar A1–A3 de una y documentar por qué.
 **Hecho significa:** cada uno de A1–A3 tiene claim reconstruido, veredicto
 (real / descartable) y evidencia.
 
+**Estado: DONE (2026-09-27).** La recuperación se hizo leyendo el código en las
+tres ubicaciones. Los tres claims quedaron reconstruidos y clasificados como
+**descartables**, cada uno con su evidencia en A1-A3. No había ningún hallazgo
+real detrás: el grupo se conserva como registro de que se recuperaron y se
+cerraron con evidencia, no como una lista pendiente.
+
 ### A1 — `internal/analysis/orchestrator.go:84-93` · severidad `WARNING`
 
 Zona: el cuerpo de `Detect`, donde corre el pipeline determinístico y después se
 publica bajo lock.
+
+**Veredicto: descartable.** Verificado en `internal/analysis/orchestrator.go`:
+todo el pipeline determinístico (`QualityChecker.Check`, `BaselineCalc.Calculate`,
+`dataGapsFor`, `Detector.Detect`, `Correlator.Correlate`, `Classifier.Classify`,
+`Scorer.Score`, `EvidenceBuilder.Build`) corre **antes** del `o.mu.Lock()` y opera
+solo sobre valores locales. La publicación es una única sección crítica que
+asigna `o.evidence`, `o.dataGaps` y `o.generation++` juntos, y `Evidence()` copia
+bajo `RLock`. No hay forma de que un lector observe un snapshot partido: la
+carrera que el hallazgo sospechaba ya está excluida por el diseño.
 
 ### A2 — `cmd/api/main.go:61-66` · severidad `WARNING`
 
@@ -66,12 +81,36 @@ Zona: la goroutine que lanza `Enrich()` en segundo plano. Sospecha razonable a
 investigar: **qué pasa si `Enrich` falla o el proceso recibe una señal mientras
 corre** — hoy no hay manejo de error en esa goroutine.
 
+**Veredicto: descartable.** Verificado en `cmd/api/main.go`: la goroutine es
+best-effort por diseño. `Detect()` ya publicó el payload determinístico completo
+antes de arrancarla, así que si `Enrich` falla o el proceso recibe una señal solo
+se pierde el texto opcional `llm_analysis`. La única brecha real es de
+**observabilidad**, no de corrección: `internal/analysis/orchestrator.go` saltea
+cada error del LLM con un `continue` sin loggear, y la goroutine no tiene
+`recover`.
+
 ### A3 — `data/events.csv:2-5` · severidad `SUGGESTION`
 
 Zona: las cuatro descripciones de eventos. Es un `SUGGESTION` sobre datos, no
 sobre código. Sospecha razonable: las descripciones están **incrustadas** en el
 `reason` determinístico vía el join de `evidenceBuilder.go`, así que un cambio de
 dataset altera el texto de la API.
+
+**Veredicto: descartable, y el mecanismo que afirmaba este backlog es incorrecto.**
+Verificado contra `internal/analysis/evidenceBuilder.go`,
+`internal/analysis/correlator.go` y `internal/api/handlers/endpoints.go`: de las
+cuatro descripciones de `data/events.csv:2-5`, **solo dos** llegan al `reason`
+determinístico —las ramas `EXPLAINABLE_ANOMALY` y `FALSE_POSITIVE` de
+`describeEvidence`, que interpolan `eventDescription(...)`— (`M-104` y `M-106`).
+Una tercera (`M-112`, tipo `DATA_QUALITY`) llega **solo** a
+`correlated_events[].description`: `describeEvidence` no cita eventos en la rama
+`DATA_QUALITY`, y `newAnomalyDTO` solo publica eventos cuando `Correlation.Explains`
+es verdadero —lo que sí ocurre para `EventDataQuality`, que `explainsDeviation`
+acepta—. La cuarta (`M-109`, evento `UNKNOWN`) **no llega a ningún campo de la
+API**: `classifyType` la manda a `REAL_ANOMALY` (cuya plantilla no cita eventos) y
+`anyExplainsDeviation` excluye explícitamente `EventUnknown`, así que
+`CorrelatedEvents` sale vacío. No es un dato roto: es la restricción de diseño de
+que un evento `UNKNOWN` nunca explica una desviación.
 
 ---
 
@@ -84,6 +123,8 @@ recibe información que **contradice** el código que está mirando.
 
 ### B1 — `openspec/` describe una arquitectura que no existe — **RESUELTO** (2026-09-27)
 
+- **Commit:** `e713860` — `docs: mark the openspec draft historical and correct
+  the plan prefix`.
 - **Dónde:** `openspec/specs/backend_implementation.sdd.yaml` (`status: draft`,
   versión 0.1.0) y `openspec/config.yaml`.
 - **Qué dice mal:** chi como router (`:30` `internal/api/routes/ → chi router
@@ -96,7 +137,6 @@ recibe información que **contradice** el código que está mirando.
   explícitamente como histórica/abandonada para que nadie la tome como vigente.
 - **Ojo:** hay que decidir **qué** hacer con ella antes de reescribirla. La spec
   está en `draft` y nunca se completó.
-- **Commit:** `_pendiente_`.
 - **Hechos corregidos:** ni la spec ni `config.yaml` afirman ya una arquitectura
   vigente. La spec conserva **intacto** su contenido arquitectónico y su
   `status: draft` (no se tocó el enum), pero lleva un banner
@@ -120,7 +160,8 @@ recibe información que **contradice** el código que está mirando.
 - **Este es el archivo donde vive `/api/v1`**, no `openspec/` (ver B1).
 - **Terminado significa:** el plan apunta al prefijo `/api` real, o marca
   claramente que `/api/v1` era la intención original y no se implementó.
-- **Commit:** `_pendiente_`.
+- **Commit:** `e713860` — `docs: mark the openspec draft historical and correct
+  the plan prefix`.
 - **Hechos corregidos:** las cinco entradas de
   `docs/backend-implementation-plan.md:159-163` ahora usan el prefijo real
   `/api`; la quinta pasó de `/api/v1/anomalies/{meter_id}` a
@@ -137,7 +178,7 @@ recibe información que **contradice** el código que está mirando.
 
 ### B3 — `docs/routing.md:35` muestra una firma vieja — **RESUELTO** (2026-09-27)
 
-- **Commit:** `_pendiente_`.
+- **Commit:** `75a4741` — `docs: fix the routing and endpoint drift (B3, B4)`.
 - **Hechos corregidos:** `internal/api/router.go:33` es
   `func NewRouter(orchestrator *analysis.Orchestrator) http.Handler`: el
   parámetro `port` no existe. Además, el health handler no vive en `router.go`
@@ -151,7 +192,7 @@ recibe información que **contradice** el código que está mirando.
 
 ### B4 — `docs/endpoints.md` sub-documenta el DTO de anomalía — **RESUELTO** (2026-09-27)
 
-- **Commit:** `_pendiente_`.
+- **Commit:** `75a4741` — `docs: fix the routing and endpoint drift (B3, B4)`.
 - **Hechos corregidos:** el ejemplo de `GET /api/anomalies` mostraba 10 campos y
   el `AnomalyDTO` (`internal/api/handlers/endpoints.go:36-72`) emite 18. Los 8
   faltantes son `priority` (int), `baseline` (objeto: `mean`, `stddev`, `count`,
@@ -226,30 +267,117 @@ recibe información que **contradice** el código que está mirando.
   que `docs/endpoints.md` lo diga de forma prominente para que nadie asuma que
   comparte la forma de `/api/anomalies`.
 
+### C4 — Valores no finitos vuelven a entrar por la puerta de los datos
+
+- **Dónde:** `internal/data/csv/loader.go` (parseo numérico con
+  `strconv.ParseFloat`) y `internal/analysis/quality.go:35` (`Check`).
+- **Qué pasa:** `strconv.ParseFloat` acepta las cadenas `NaN`, `Inf` e
+  `Infinity`, y el filtro de calidad solo descarta consumo negativo
+  (`r.Consumption < 0`, y `NaN < 0` es falso, así que un `NaN` pasa) y status
+  distinto de `OK`. Una lectura así vuelve a producir una línea base no finita:
+  la precondición de las 2 lecturas de C1 no cubre este caso. En la misma familia,
+  un `varSum` que desborde a `+Inf` con entradas **finitas** enormes (por ejemplo
+  `1e200`) da un desvío infinito (`internal/analysis/baseline.go`).
+- **Por qué importa:** es exactamente el modo de falla que C1 creyó cerrar,
+  alcanzable por otra vía: el dato entra por la carga, no por el número de
+  lecturas.
+- **Estado de verificación:** verificado por lectura del código; sin disparador en
+  el dataset.
+- **Terminado significa:** validar finitud en la carga o en el filtro, y cubrirlo
+  con un test.
+
+### C5 — Los handlers descartan el error de encode
+
+- **Dónde:** `internal/api/handlers/endpoints.go:206` (el `writeJSON` compartido)
+  y `internal/api/router.go:112` (handler de `/api/reports`).
+- **Qué pasa:** ambos ignoran el error de `json.NewEncoder(...).Encode(...)`, y
+  `writeJSON` ya escribió el header `200` antes de intentar el encode.
+- **Por qué importa:** cualquier valor no finito que llegue al payload (ver C4)
+  responde **200 con cuerpo vacío** en lugar de fallar ruidosamente con un 500.
+- **Estado de verificación:** verificado por lectura del código; son las mismas
+  líneas que ya cita `docs/architecture.md` §13.
+- **Terminado significa:** comprobar el error del encode y responder un 500 con
+  cuerpo de error cuando el payload no sea serializable.
+
+### C6 — `SERVER_PORT` documentado pero no usado ni vinculado (heredado de §13)
+
+- **Dónde:** `internal/config/config.go` (comentario del header) y `Load()`.
+- **Qué pasa:** el comentario documenta `SERVER_PORT` con default `8080`, pero el
+  código hace `v.SetDefault("server.port", 3001)` y **nunca** registra
+  `v.BindEnv("server.port", ...)`. El puerto solo se cambia por `config.yaml`.
+- **Por qué importa:** un operador que exporta `SERVER_PORT` espera otro puerto y
+  el server sigue escuchando en 3001.
+- **Estado de verificación:** verificado por lectura del código; es la misma deuda
+  que `docs/architecture.md` §13. Se agrega acá porque hasta hoy existía **solo**
+  en §13 y los dos documentos no coincidían.
+- **Terminado significa:** alinear comentario y default, y vincular la variable de
+  entorno (o borrar la mención).
+
+### C7 — Arranque sin señal de readiness (heredado de §13)
+
+- **Dónde:** `internal/api/handlers/endpoints.go:15-19` (`Health`) y el tag
+  `json:"llm_analysis,omitempty"` del `AnomalyDTO` en el mismo archivo.
+- **Qué pasa:** `GET /api/health` responde `200` desde el primer instante, pero
+  mientras corre el enriquecimiento en segundo plano `llm_analysis` puede estar
+  **ausente** del JSON (el campo es `omitempty`, así que se omite la clave entera
+  y no se emite `""`), aunque el resto del payload ya es final y correcto.
+- **Por qué importa:** un cliente no puede distinguir "listo y sin narrativa" de
+  "todavía enriqueciendo".
+- **Estado de verificación:** verificado por lectura del código; es la misma deuda
+  que `docs/architecture.md` §13, agregada acá por la misma razón que C6.
+- **Terminado significa:** una señal explícita de readiness, o documentar que la
+  ausencia de `llm_analysis` es el estado válido.
+
+---
+
+## Pendientes heredados de `odd/review-backend-plan/tasks.md`
+
+Tres ítems de ese archivo siguen genuinamente abiertos y no tienen diseño
+iniciado. Se indexan acá para que el backlog quede completo; el detalle y el
+contexto original viven en `odd/review-backend-plan/tasks.md`.
+
+- **Structured logging:** no existe un framework de logging estructurado; el
+  código usa el `log` estándar y `internal/logger` (zerolog) fue eliminado en
+  `repo-hygiene`.
+- **Especificación OpenAPI:** no existe spec OpenAPI/Swagger en el repo; el
+  contrato HTTP se documenta a mano en `docs/endpoints.md`.
+- **Workflow de CI:** no existe `.github/` ni ningún workflow; `go test`, lint y
+  build no corren automáticamente.
+
 ---
 
 ## Orden sugerido
 
-Si hay que elegir, el que más rinde por esfuerzo es **B4**, y después el resto del
-drift documental (B1/B2/B3).
+Con B1-B4, C1 y todo el grupo A ya cerrados, el conjunto de pendientes cambió por
+completo: el orden anterior estaba armado alrededor de trabajo que ya no existe.
+Hoy lo que más rinde por esfuerzo es cerrar la vía por la que un dato no finito
+todavía puede romper la respuesta.
 
-1. **A0** primero, porque desbloquea (o cierra) todo el grupo A y no requiere
-   escribir código.
-2. **B4** — el impacto es real para el frontend, el arreglo es acotado y es puro
-   texto.
-3. **B1/B2/B3** — juntos, porque son el mismo tipo de trabajo y comparten
-   decisión de política ("¿qué hacemos con los documentos históricos?").
-4. **C2** — barato, pero conviene esperar a tener un caso que lo dispare o a
-   tocarlo por otro motivo.
-5. **C3** — es una decisión de producto; no hay trabajo técnico hasta que se
+1. **C5** primero: son dos llamadas (`endpoints.go:206` y `router.go:112`), el
+   arreglo es chico y convierte un fallo silencioso (200 con cuerpo vacío) en un
+   500 ruidoso. Es el que más rinde por esfuerzo de toda la lista.
+2. **C4** inmediatamente después: sin la validación de finitud en la carga, C5
+   solo cambia el silencio por un error; juntos cierran la clase de falla que C1
+   creyó cerrar.
+3. **C6** — trivial (comentario, default y binding de entorno) y elimina una
+   trampa real para quien despliega.
+4. **C7** — chico, y deja explícito qué significa que `llm_analysis` falte.
+5. **C2** — barato, pero sigue latente: conviene esperar a tener un caso que lo
+   dispare o a tocarlo por otro motivo.
+6. **C3** — es una decisión de producto; no hay trabajo técnico hasta que se
    tome.
+7. **Los tres heredados de `review-backend-plan`** (logging estructurado, OpenAPI,
+   CI) al final: cada uno es una feature propia, no un ajuste, y ninguno
+   desbloquea a otro pendiente.
 
-**C1 ya está resuelto** (commit `3051333`, 2026-09-27 y ver arriba), así que sale
-del conjunto de pendientes y no participa del orden.
+**Ya no participan del orden:** A0-A3 (recuperados y descartados, ver arriba),
+B1-B4 (commits `e713860` y `75a4741`) y C1 (commit `3051333`).
 
 ## Fuera de alcance de este backlog
 
-- Los tres PRs (`#1`, `#2`, `#3`) están mergeados y `main` está al día.
+- Los tres PRs (`#1`, `#2`, `#3`) están mergeados en `main`. El fix de las dos
+  lecturas vive en la rama `fix/baseline-min-two-readings` (commits `6047d80` a
+  `e713860`) y **todavía no está mergeado**: `main` sigue en `210f727`.
 - La traducción al español de la superficie de análisis **está hecha y
   verificada**; no queda texto inglés en campos visibles de usuario. Lo que
   queda en inglés son tokens de contrato, claves JSON y el body de `README.md`,
