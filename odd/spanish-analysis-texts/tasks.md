@@ -143,19 +143,77 @@ One writer thread only; no parallel writers in this worktree.
       values in `data/events.csv`, keeping the CSV schema and the event types
       untouched. Confirm nothing outside the dataset depends on the exact English
       strings. Commit.
-- [ ] **WU5 — Align the documented examples.** Update the `reason` and
-      `recommended_action` example values in `docs/endpoints.md` so the doc shows
-      what the API now returns. Commit.
-- [ ] **WU6 — Closure verification.** `go test ./...`, `go test -race ./...`, and
-      a live run confirming that `/api/anomalies` returns Spanish `reason`,
-      `recommended_action`, `data_quality.reason` and
-      `correlated_events[].description`, that `llm_analysis` is Spanish, and that
-      the contract tokens are still the English machine values. Evidence only.
-- [ ] **WU7 — Spanish for the deterministic mock narrative.** Translate the five
-      `GenerateExplanation` strings in `internal/analysis/llm.go` that the mock
-      provider returns when `LLM_API_KEY` is empty, and add the missing test that
-      pins them: no existing test asserted the mock text, so nothing would catch
-      a regression there. Same format-verb discipline as WU1. Commit.
+- [x] **WU5 — Align the documented examples.** DONE, commit `56d62e5`.
+      Updated the `reason`, `recommended_action` and `llm_analysis` examples of
+      the anomaly payload, the `explanation` and `recommendation` examples of
+      `/api/reports`, and the three 404 bodies. The 404 strings were verified
+      character by character against the handlers.
+
+      Incidental fix: the example used to show `150.0%` next to a `50%` delta, an
+      internal inconsistency that predated this feature.
+
+- [x] **WU6 — Closure verification.** DONE. Independent verifier returned
+      **`verified`** with executed evidence:
+
+      - `go test ./...`, `go test -race ./...` and `go vet ./...` all exit 0.
+      - Real provider run (spare port, live): all four anomalies return Spanish
+        `reason`, `recommended_action`, `data_quality.reason` and
+        `correlated_events[].description`, and `llm_analysis` is Spanish real
+        markdown. Enrichment took 1m10s, so the provider was genuinely remote.
+      - Mock path (`LLM_API_KEY=` empty): `llm_analysis` is Spanish and provably
+        the mock, by the `Revisión determinista del medidor` prefix and a 0s
+        enrichment.
+      - Contract tokens unchanged in the live responses: `REAL_ANOMALY`,
+        `DATA_QUALITY`, `EXPLAINABLE_ANOMALY`, `FALSE_POSITIVE`; `HIGH`,
+        `MEDIUM`, `LOW`; `explained`, `unexplained`; and the analysis
+        `status: "completed"`.
+      - The three 404 bodies are `{"error":"medidor ... no encontrado"}`,
+        `{"error":"anomalía ... no encontrada"}` and
+        `{"error":"análisis ... no encontrado"}`.
+
+- [x] **WU7 — Spanish for the deterministic mock narrative.** DONE, commit
+      `9972d6b`. Five sentences translated, `fmt` verb sequence verified
+      identical before and after, and the previously absent coverage added: no
+      test asserted the mock text at all, so a regression there would have been
+      silent. `TestMockLLMExplanationIsSpanish` now pins all five branches.
+
+## Review closure and residual limits
+
+The slice review closed **approved** on the first attempt for this feature
+(lineage `review-c9ab19ba7248651a`, tier medium, 18 files, 1734 accumulated
+lines, one lens). No correction was required; authority was burned with
+`gentle-ai.review-acknowledged/v1`. This contrasts with the previous feature,
+whose three lineages ended without a clean closure, which suggests those earlier
+failures were transient or state-dependent rather than deterministic.
+
+The reviewer left three advisory findings, all explicitly non-blocking and
+dispositioned `informational`:
+
+| ID | Severity | Location |
+| --- | --- | --- |
+| R3-001 | WARNING | `internal/analysis/orchestrator.go:84-93` |
+| R3-002 | WARNING | `cmd/api/main.go:61-66` |
+| R3-003 | SUGGESTION | `data/events.csv:2-5` |
+
+The closure envelope carries their ids, severities and locations but not their
+claims, and a later STATUS does not expose them. They are recorded here as
+separate later work, exactly as the envelope instructs; they are not a reason to
+re-run review on this candidate.
+
+### Limits the verifier could not close
+
+- A live model is not deterministic: the instruction raises the odds of Spanish
+  but does not guarantee it across models, providers or run conditions. One real
+  run was observed, fully Spanish, plus the static instruction.
+- `/api/reports` serialises the raw domain model, so its JSON **keys** are
+  English Go field names and it exposes English enum `Kind` values such as
+  `CONSUMPTION_SPIKE`. Keys are not prose, and the asserted `explanation` and
+  `recommendation` values are Spanish; whether those keys count as user-visible
+  text is a product judgement, not an execution result.
+- `/api/dashboard/summary` returns the English status tokens `ok` and `latest`.
+  Same product judgement applies.
+- Endpoints outside the anomaly surface (`/api/meters`, the readings success
+  body) were not scanned for prose.
 
 ## Acceptance evidence
 
