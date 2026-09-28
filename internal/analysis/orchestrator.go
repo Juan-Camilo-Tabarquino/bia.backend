@@ -9,6 +9,28 @@ import (
 	"github.com/neuralium/ai-energy/internal/domain/models"
 )
 
+// Pipeline stage identifiers. They are the exact strings published as the
+// current stage by GET /api/ai/analysis/{id}, in this order: the first five are
+// emitted by the deterministic detect stage and the last two by the per-meter
+// narrative stage. The HTTP contract freezes both the ids and their order.
+const (
+	StageLecturas      = "lecturas"
+	StageBaseline      = "baseline"
+	StageDeteccion     = "deteccion"
+	StageCorrelacion   = "correlacion"
+	StageEventos       = "eventos"
+	StageExplicacion   = "explicacion"
+	StageRecomendacion = "recomendacion"
+)
+
+// reportStage invokes a progress reporter when one was supplied. A nil reporter
+// is the no-progress path used by the synchronous public methods.
+func reportStage(report func(stage string), stage string) {
+	if report != nil {
+		report(stage)
+	}
+}
+
 // Orchestrator ties all stages together.
 // It loads data from CSVs, runs the deterministic pipeline and holds the
 // generated evidence for API consumption.
@@ -72,7 +94,16 @@ func NewOrchestrator(loader *csv.Loader, rrepo *memory.ReadingRepo, erepo *memor
 // populated once and kept as the read model behind the meter endpoints; every
 // call still reloads the files and recomputes the evidence, which is what
 // POST /api/ai/analyze relies on.
-func (o *Orchestrator) Detect() error {
+func (o *Orchestrator) Detect() error { return o.detect(nil) }
+
+// detect is the progress-aware implementation behind Detect. The optional
+// report callback is invoked at the start of each deterministic stage with the
+// exact stage id the HTTP contract publishes, so an asynchronous caller can
+// surface real progress. Detect passes nil and therefore reports nothing,
+// preserving its original behaviour.
+func (o *Orchestrator) detect(report func(stage string)) error {
+	// lecturas: the source files are read and parsed.
+	reportStage(report, StageLecturas)
 	// Load from disk on every run so a re-run has fresh source data.
 	readings, err := o.Loader.LoadReadings()
 	if err != nil {
@@ -88,14 +119,22 @@ func (o *Orchestrator) Detect() error {
 	// Deterministic pipeline. It reads only local values, so it runs outside
 	// the lock: the LLM never participates in detection, classification or
 	// scoring; it only narrates the result later, in Enrich.
+	// baseline: the quality filter and the per-meter statistics.
+	reportStage(report, StageBaseline)
 	good := o.QualityChecker.Check(readings)
 	baseline := o.BaselineCalc.Calculate(good)
 	// A meter with no baseline entry survived the quality check but had too few
 	// readings to be validated. Computing the gaps here, once per Detect, keeps
 	// them part of the same deterministic snapshot as the evidence.
 	gaps := dataGapsFor(good, baseline)
+	// deteccion: the deterministic anomaly rules.
+	reportStage(report, StageDeteccion)
 	candidates := o.Detector.Detect(good, baseline)
+	// correlacion: matching anomalies against the operational events.
+	reportStage(report, StageCorrelacion)
 	correlated := o.Correlator.Correlate(candidates, events)
+	// eventos: classifying the correlated result and scoring its priority.
+	reportStage(report, StageEventos)
 	classified := o.Classifier.Classify(correlated)
 	scored := o.Scorer.Score(classified)
 	built := o.EvidenceBuilder.Build(scored)
@@ -208,6 +247,102 @@ func (o *Orchestrator) Run() error {
 	}
 	o.Enrich()
 	return nil
+}
+
+// MeterAnalysis is the result of a per-meter run: the meter's own evidence with
+// its narrative attached, plus the whole-platform totals produced by the same
+// deterministic snapshot that produced that evidence.
+type MeterAnalysis struct {
+	// Evidence holds only the requested meter's evidence, carrying whatever LLM
+	// narrative this run managed to produce. It is the subset the analysis result
+	// must publish.
+	Evidence []models.Evidence
+	// TotalAnomalies is the whole-platform evidence count and HighPriority the
+	// number of those items whose severity is HIGH, both taken from the same
+	// snapshot as Evidence.
+	TotalAnomalies int
+	HighPriority   int
+}
+
+// RunMeter runs the whole deterministic pipeline exactly as Detect does and then
+// narrates only meterID's evidence, reporting the deterministic stages and the
+// two narrative stages through the optional reporter.
+//
+// It is the per-meter, progress-aware entry point used by the asynchronous
+// POST /api/ai/analyze handler. It deliberately leaves Detect, Enrich and Run
+// untouched, so their whole-platform semantics do not change.
+func (o *Orchestrator) RunMeter(meterID string, report func(stage string)) (MeterAnalysis, error) {
+	if err := o.detect(report); err != nil {
+		return MeterAnalysis{}, err
+	}
+	return o.EnrichMeter(meterID, report), nil
+}
+
+// EnrichMeter narrates only the evidence belonging to meterID and returns that
+// meter's evidence together with the whole-platform totals of the snapshot it
+// was generated from.
+//
+// It mirrors Enrich's locking discipline item for item: a snapshot is copied
+// under a brief read lock, every LLM call happens outside any lock, and each
+// narrative is written back under a short write lock. The write-back is guarded
+// by the published snapshot generation exactly as Enrich documents it, so a
+// concurrent detect (another meter's run) can never attach a stale narrative to
+// a republished payload. Unlike Enrich, the returned slice always carries this
+// run's narrative even when the write-back was dropped, because the per-meter
+// result must not depend on what the global snapshot currently holds.
+func (o *Orchestrator) EnrichMeter(meterID string, report func(stage string)) MeterAnalysis {
+	o.mu.RLock()
+	snapshot := make([]models.Evidence, len(o.evidence))
+	copy(snapshot, o.evidence)
+	snapshotGeneration := o.generation
+	o.mu.RUnlock()
+
+	highPriority := 0
+	indices := make([]int, 0)
+	for i := range snapshot {
+		if snapshot[i].Severity == models.SeverityHigh {
+			highPriority++
+		}
+		if string(snapshot[i].Anomaly.MeterID) == meterID {
+			indices = append(indices, i)
+		}
+	}
+
+	// explicacion: the narrative call for this meter's evidence. There is at most
+	// one LLM call per evidence item, so a per-meter run narrates only the items
+	// that belong to this meter instead of the whole platform.
+	reportStage(report, StageExplicacion)
+	if o.LLM != nil {
+		for _, i := range indices {
+			o.mu.RLock()
+			superseded := o.generation != snapshotGeneration
+			o.mu.RUnlock()
+			if superseded {
+				break
+			}
+			txt, err := o.LLM.GenerateExplanation(snapshot[i])
+			if err != nil {
+				continue
+			}
+			snapshot[i].LLMText = txt
+			o.mu.Lock()
+			if o.generation == snapshotGeneration && i < len(o.evidence) {
+				o.evidence[i].LLMText = txt
+			}
+			o.mu.Unlock()
+		}
+	}
+	// recomendacion: the provider returns the rationale and the recommended
+	// action in a single response, so this stage carries no duration of its own.
+	// It is still reported, immediately after the call returns, so progress
+	// reaches all seven stages and the client is never left on a spinner.
+	reportStage(report, StageRecomendacion)
+
+	out := make([]models.Evidence, 0, len(indices))
+	for _, i := range indices {
+		out = append(out, snapshot[i])
+	}
+	return MeterAnalysis{Evidence: out, TotalAnomalies: len(snapshot), HighPriority: highPriority}
 }
 
 // Evidence returns a copy of the last run's evidence so callers cannot mutate

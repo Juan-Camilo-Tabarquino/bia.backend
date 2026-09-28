@@ -64,8 +64,8 @@ path variables each handler extracts from `r.URL.Path`.
 | GET | `/api/meters/{meterId}/readings` | Readings for a meter, optionally filtered by `from`/`to`. |
 | GET | `/api/anomalies` | List of anomaly evidence. |
 | GET | `/api/anomalies/{id}` | Detail for one anomaly id. |
-| POST | `/api/ai/analyze` | Re-run the pipeline and return a new analysis id. |
-| GET | `/api/ai/analysis/{id}` | Result of a previous analysis run. |
+| POST | `/api/ai/analyze` | Start a per-meter analysis (`{"meter_id":"…"}`); returns 202 with an analysis id. |
+| GET | `/api/ai/analysis/{id}` | Live state and, once finished, the result of that analysis run. |
 | GET | `/api/dashboard/summary` | High-level counts for the dashboard. |
 
 See `docs/endpoints.md` for the parameters and JSON body of each route.

@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -10,22 +12,124 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/neuralium/ai-energy/internal/analysis"
-	"github.com/neuralium/ai-energy/internal/domain/models"
 )
 
-// analysisStore keeps an immutable snapshot of the evidence produced by each
-// POST /api/ai/analyze run, keyed by the generated analysis id. A mutex guards
-// the map so concurrent requests for the same id neither race nor panic.
+// analysisStore holds the live record of every analysis run, keyed by the
+// generated analysis id. Unlike the old whole-platform snapshot map, a record is
+// mutable while its run is in flight: the goroutine started by
+// POST /api/ai/analyze advances its status, stage and progress in place. A
+// single mutex guards the map and every record in it, so concurrent readers for
+// the same id never observe a half-written record and never race the writer.
 var (
-	analysisStore = make(map[string][]models.Evidence)
+	analysisStore = make(map[string]*analysisRecord)
 	storeMutex    sync.Mutex
 )
 
-// analysisResultDTO is the body returned by GET /api/ai/analysis/{id}.
+// Analysis run statuses published in the status field. "queued" is set before
+// the goroutine starts, "running" once the pipeline reports a stage.
+const (
+	statusQueued    = "queued"
+	statusRunning   = "running"
+	statusCompleted = "completed"
+	statusFailed    = "failed"
+)
+
+// Stage ids that are not pipeline stages but are still published in the stage
+// field: the initial queued marker and the two terminal markers.
+const (
+	stageQueued    = "queued"
+	stageCompleted = "completed"
+	stageFailed    = "failed"
+)
+
+// progressTotal is the number of pipeline stages the client renders: the five
+// deterministic stages plus the two narrative stages.
+const progressTotal = 7
+
+// analysisWatchdog bounds one analysis run. The provider already caps each LLM
+// call at 60 s; this is the whole-run ceiling, so a stuck pipeline always ends
+// in a terminal "failed" record and the client's spinner can never hang.
+const analysisWatchdog = 90 * time.Second
+
+// analysisStages is the frozen pipeline order. The index of a stage is exactly
+// the number of stages that have already settled when that stage is the current
+// one, so progress.done is derived from it and never invented.
+var analysisStages = []string{
+	analysis.StageLecturas,
+	analysis.StageBaseline,
+	analysis.StageDeteccion,
+	analysis.StageCorrelacion,
+	analysis.StageEventos,
+	analysis.StageExplicacion,
+	analysis.StageRecomendacion,
+}
+
+func stageIndex(stage string) int {
+	for i, s := range analysisStages {
+		if s == stage {
+			return i
+		}
+	}
+	return 0
+}
+
+// analysisRecord is the mutable, in-memory state of one analysis run. It is
+// created as queued, advanced by the run's goroutine and read by the GET
+// handler, always under storeMutex.
+//
+// Once a record reaches a terminal status (completed or failed) it is never
+// written again, so a result body built from it stays stable.
+//
+// A record holds only the requested meter's anomaly DTOs, mapped through the
+// shared anomalyDTOs helper, plus the whole-platform counts produced by the same
+// run.
+type analysisRecord struct {
+	meterID      string
+	status       string
+	stage        string
+	progressDone int
+	startedAt    time.Time
+	finishedAt   *time.Time
+	err          string
+	anomalies    []AnomalyDTO
+	platform     *analysisPlatformDTO
+}
+
+// analysisProgressDTO is the progress block of the analysis result.
+type analysisProgressDTO struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
+}
+
+// analysisPlatformDTO is the whole-platform count produced by the same run as
+// the per-meter anomalies. TotalAnomalies counts every evidence item;
+// HighPriority counts those whose severity is HIGH.
+type analysisPlatformDTO struct {
+	TotalAnomalies int `json:"total_anomalies"`
+	HighPriority   int `json:"high_priority"`
+}
+
+// analysisCreatedDTO is the 202 body of POST /api/ai/analyze.
+type analysisCreatedDTO struct {
+	AnalysisID string `json:"analysisId"`
+	MeterID    string `json:"meter_id"`
+	Status     string `json:"status"`
+}
+
+// analysisResultDTO is the body returned by GET /api/ai/analysis/{id}. The
+// shape is frozen: the frontend client is written against it. Platform is only
+// present once the run completes, and Error is null unless the run failed.
 type analysisResultDTO struct {
-	AnalysisID string       `json:"analysisId"`
-	Status     string       `json:"status"`
-	Anomalies  []AnomalyDTO `json:"anomalies"`
+	AnalysisID string               `json:"analysisId"`
+	MeterID    string               `json:"meter_id"`
+	Status     string               `json:"status"`
+	Stage      string               `json:"stage"`
+	Progress   analysisProgressDTO  `json:"progress"`
+	StartedAt  string               `json:"started_at"`
+	FinishedAt *string              `json:"finished_at"`
+	Anomalies  []AnomalyDTO         `json:"anomalies"`
+	Platform   *analysisPlatformDTO `json:"platform,omitempty"`
+	Error      *string              `json:"error"`
 }
 
 // meterDTO is the body returned by GET /api/meters/{meterId}.
@@ -40,26 +144,205 @@ type meterDTO struct {
 	LastReadingAt string `json:"last_reading_at"`
 }
 
-// POST /api/ai/analyze – re-run the pipeline and return a fresh analysis id.
+// AnalyzePOST starts an asynchronous, per-meter analysis run.
+//
+// The request body carries the target meter. A missing or unknown meter is a
+// 400. For a known meter the handler mints an id, records it as "queued" and
+// answers 202 immediately, while the pipeline runs in a goroutine. If a run for
+// the same meter is already queued or running, the existing id is returned with
+// 202 and no second LLM call is started.
 func AnalyzePOST(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Re-run the real pipeline through the existing orchestrator. Run is
-		// idempotent, so calling it here never duplicates the stored readings.
-		if err := orchestrator.Run(); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+		var req struct {
+			MeterID string `json:"meter_id"`
+		}
+		// A missing or malformed body simply leaves MeterID empty, which the
+		// validation below rejects with the same user-visible 400.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		meterID := strings.TrimSpace(req.MeterID)
+		if meterID == "" {
+			writeJSONError(w, http.StatusBadRequest, "meter_id es obligatorio")
 			return
 		}
-		// Evidence returns a copy, so the snapshot is immune to a later run.
-		snapshot := orchestrator.Evidence()
-		analysisID := uuid.New().String()
+		if !meterExists(orchestrator, meterID) {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("medidor %s no encontrado", meterID))
+			return
+		}
+
 		storeMutex.Lock()
-		analysisStore[analysisID] = snapshot
+		// Return the in-flight run for this meter instead of starting a second
+		// one, so pressing the button twice never issues a second LLM call.
+		for id, rec := range analysisStore {
+			if rec.meterID == meterID && !isTerminal(rec) {
+				status := rec.status
+				storeMutex.Unlock()
+				writeJSON(w, http.StatusAccepted, analysisCreatedDTO{
+					AnalysisID: id, MeterID: meterID, Status: status,
+				})
+				return
+			}
+		}
+		analysisID := uuid.New().String()
+		analysisStore[analysisID] = &analysisRecord{
+			meterID:   meterID,
+			status:    statusQueued,
+			stage:     stageQueued,
+			startedAt: time.Now().UTC(),
+		}
 		storeMutex.Unlock()
-		writeJSON(w, http.StatusOK, map[string]string{"analysisId": analysisID})
+
+		go runMeterAnalysis(orchestrator, analysisID, meterID)
+
+		writeJSON(w, http.StatusAccepted, analysisCreatedDTO{
+			AnalysisID: analysisID, MeterID: meterID, Status: statusQueued,
+		})
 	}
 }
 
-// GET /api/ai/analysis/{id} – retrieve the stored result of a previous analysis.
+// meterExists reports whether the meter is known to the reading repository. The
+// repository is populated by the synchronous Detect at start-up, so an unknown
+// meter is a client error rather than an empty analysis.
+func meterExists(orchestrator *analysis.Orchestrator, meterID string) bool {
+	for _, id := range orchestrator.ReadingRepo.AllMeterIDs() {
+		if id == meterID {
+			return true
+		}
+	}
+	return false
+}
+
+// isTerminal reports whether a run can no longer change. Terminal records are
+// never overwritten, so a late completion cannot resurrect a run the watchdog
+// already failed.
+func isTerminal(rec *analysisRecord) bool {
+	return rec.status == statusCompleted || rec.status == statusFailed
+}
+
+// runMeterAnalysis executes one asynchronous run and always leaves a terminal
+// record behind.
+func runMeterAnalysis(orchestrator *analysis.Orchestrator, id, meterID string) {
+	// The watchdog marks the run failed even while the goroutine is still parked
+	// inside a provider call, which is the only way the client can never wait
+	// forever. It is stopped as soon as the goroutine returns.
+	watchdog := time.AfterFunc(analysisWatchdog, func() {
+		failAnalysis(id, fmt.Sprintf("el análisis superó el tiempo máximo de %s", analysisWatchdog))
+	})
+	defer watchdog.Stop()
+	// A panic anywhere in the pipeline must surface as a failed run rather than
+	// as a silent goroutine death that leaves the record non-terminal forever.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("analysis %s panicked: %v", id, recovered)
+			failAnalysis(id, fmt.Sprintf("error interno del análisis: %v", recovered))
+		}
+	}()
+
+	setAnalysisRunning(id)
+	report := func(stage string) { setAnalysisStage(id, stage) }
+
+	result, err := orchestrator.RunMeter(meterID, report)
+	if err != nil {
+		failAnalysis(id, err.Error())
+		return
+	}
+	completeAnalysis(id, result)
+}
+
+// setAnalysisRunning flips a freshly created record to running.
+func setAnalysisRunning(id string) {
+	storeMutex.Lock()
+	if rec := analysisStore[id]; rec != nil && !isTerminal(rec) {
+		rec.status = statusRunning
+	}
+	storeMutex.Unlock()
+}
+
+// setAnalysisStage records the current pipeline stage and derives progress.done
+// from the frozen stage order, so done only ever reflects stages that settled.
+func setAnalysisStage(id, stage string) {
+	storeMutex.Lock()
+	if rec := analysisStore[id]; rec != nil && !isTerminal(rec) {
+		rec.status = statusRunning
+		rec.stage = stage
+		rec.progressDone = stageIndex(stage)
+	}
+	storeMutex.Unlock()
+}
+
+// completeAnalysis stores the finished result and appends the terminal record to
+// the write-only audit log. A record already marked failed by the watchdog is
+// left untouched: terminal states are never overwritten.
+func completeAnalysis(id string, result analysis.MeterAnalysis) {
+	platform := &analysisPlatformDTO{
+		TotalAnomalies: result.TotalAnomalies,
+		HighPriority:   result.HighPriority,
+	}
+	now := time.Now().UTC()
+
+	storeMutex.Lock()
+	rec := analysisStore[id]
+	if rec == nil || isTerminal(rec) {
+		storeMutex.Unlock()
+		return
+	}
+	rec.status = statusCompleted
+	rec.stage = stageCompleted
+	rec.progressDone = progressTotal
+	rec.finishedAt = &now
+	rec.err = ""
+	rec.anomalies = anomalyDTOs(result.Evidence)
+	rec.platform = platform
+	appendAnalysisLogLocked(analysisLogRecord{
+		AnalysisID:   id,
+		MeterID:      rec.meterID,
+		Status:       rec.status,
+		StartedAt:    rec.startedAt.UTC().Format(time.RFC3339),
+		FinishedAt:   formatTimePtr(rec.finishedAt),
+		AnomalyCount: len(rec.anomalies),
+		Platform:     platform,
+	})
+	storeMutex.Unlock()
+}
+
+// failAnalysis marks the run failed with a readable reason and appends the
+// terminal record to the audit log. A completed record is never downgraded.
+func failAnalysis(id, message string) {
+	now := time.Now().UTC()
+
+	storeMutex.Lock()
+	rec := analysisStore[id]
+	if rec == nil || isTerminal(rec) {
+		storeMutex.Unlock()
+		return
+	}
+	rec.status = statusFailed
+	rec.stage = stageFailed
+	rec.finishedAt = &now
+	rec.err = message
+	appendAnalysisLogLocked(analysisLogRecord{
+		AnalysisID:   id,
+		MeterID:      rec.meterID,
+		Status:       rec.status,
+		StartedAt:    rec.startedAt.UTC().Format(time.RFC3339),
+		FinishedAt:   formatTimePtr(rec.finishedAt),
+		Error:        &message,
+		AnomalyCount: len(rec.anomalies),
+		Platform:     rec.platform,
+	})
+	storeMutex.Unlock()
+}
+
+// formatTimePtr formats an optional timestamp as RFC3339, or nil so the JSON
+// field is null rather than the zero time.
+func formatTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
+}
+
+// GET /api/ai/analysis/{id} – retrieve the live state of a previous analysis.
 func AnalysisGET(w http.ResponseWriter, r *http.Request) {
 	// Normalize path: the router mounts everything under /api.
 	path := strings.TrimPrefix(r.URL.Path, "/api")
@@ -71,20 +354,42 @@ func AnalysisGET(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimPrefix(path, prefix)
 	storeMutex.Lock()
-	snapshot, ok := analysisStore[id]
+	rec, ok := analysisStore[id]
+	var dto analysisResultDTO
+	if ok {
+		dto = analysisResultFor(id, rec)
+	}
 	storeMutex.Unlock()
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("análisis %s no encontrado", id))
 		return
 	}
-	writeJSON(w, http.StatusOK, analysisResultDTO{
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// analysisResultFor builds the frozen GET body from a live record. The caller
+// must hold storeMutex. Anomalies is always an array, and never null.
+func analysisResultFor(id string, rec *analysisRecord) analysisResultDTO {
+	anomalies := rec.anomalies
+	if anomalies == nil {
+		anomalies = []AnomalyDTO{}
+	}
+	dto := analysisResultDTO{
 		AnalysisID: id,
-		Status:     "completed",
-		// anomalyDTOs applies the shared DTO mapping and the deterministic
-		// priority ordering, so the stored analysis result matches the
-		// anomalies list endpoint field for field and in the same sequence.
-		Anomalies: anomalyDTOs(snapshot),
-	})
+		MeterID:    rec.meterID,
+		Status:     rec.status,
+		Stage:      rec.stage,
+		Progress:   analysisProgressDTO{Done: rec.progressDone, Total: progressTotal},
+		StartedAt:  rec.startedAt.UTC().Format(time.RFC3339),
+		FinishedAt: formatTimePtr(rec.finishedAt),
+		Anomalies:  anomalies,
+		Platform:   rec.platform,
+	}
+	if rec.err != "" {
+		message := rec.err
+		dto.Error = &message
+	}
+	return dto
 }
 
 // GET /api/dashboard/summary – provide a high‑level summary for the UI.

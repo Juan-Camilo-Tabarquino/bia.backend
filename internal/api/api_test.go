@@ -12,11 +12,13 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/neuralium/ai-energy/internal/analysis"
 	"github.com/neuralium/ai-energy/internal/api"
+	"github.com/neuralium/ai-energy/internal/api/handlers"
 	"github.com/neuralium/ai-energy/internal/data/csv"
 	"github.com/neuralium/ai-energy/internal/data/memory"
 	"github.com/neuralium/ai-energy/internal/domain/models"
@@ -151,6 +153,7 @@ func newTestEnvironment(t *testing.T) (*httptest.Server, *analysis.Orchestrator)
 // empty LLMText without touching the deterministic pipeline.
 func newTestEnvironmentWithLLM(t *testing.T, llm analysis.LLMClient) (*httptest.Server, *analysis.Orchestrator) {
 	t.Helper()
+	redirectAnalysisLog(t)
 	dir := t.TempDir()
 	readingsPath := filepath.Join(dir, "readings.csv")
 	eventsPath := filepath.Join(dir, "events.csv")
@@ -181,6 +184,45 @@ func newTestEnvironmentWithLLM(t *testing.T, llm analysis.LLMClient) (*httptest.
 	server := httptest.NewServer(api.NewRouter(orchestrator))
 	t.Cleanup(server.Close)
 	return server, orchestrator
+}
+
+// newDetectOnlyEnvironment builds a router-backed server over the hermetic
+// fixture and runs only the deterministic stage, so the injected LLM is never
+// called before the test does. It lets a gated LLM observe an asynchronous run
+// parked in the middle of the pipeline.
+func newDetectOnlyEnvironment(t *testing.T, llm analysis.LLMClient) *httptest.Server {
+	t.Helper()
+	redirectAnalysisLog(t)
+	dir := t.TempDir()
+	readingsPath := filepath.Join(dir, "readings.csv")
+	eventsPath := filepath.Join(dir, "events.csv")
+	if err := os.WriteFile(readingsPath, []byte(testReadingsCSV()), 0o600); err != nil {
+		t.Fatalf("write readings csv: %v", err)
+	}
+	if err := os.WriteFile(eventsPath, []byte(testEventsCSV()), 0o600); err != nil {
+		t.Fatalf("write events csv: %v", err)
+	}
+
+	orchestrator := analysis.NewOrchestrator(
+		csv.NewLoader(readingsPath, eventsPath),
+		memory.NewReadingRepo(),
+		memory.NewEventRepo(),
+		analysis.NewQualityChecker(),
+		analysis.NewBaselineCalculator(),
+		analysis.NewAnomalyDetector(),
+		analysis.NewEventCorrelator(),
+		analysis.NewClassifier(),
+		analysis.NewScorer(),
+		llm,
+		analysis.NewEvidenceBuilder(),
+	)
+	if err := orchestrator.Detect(); err != nil {
+		t.Fatalf("orchestrator detect: %v", err)
+	}
+
+	server := httptest.NewServer(api.NewRouter(orchestrator))
+	t.Cleanup(server.Close)
+	return server
 }
 
 // datasetReadingsPath and datasetEventsPath point at the real repository dataset,
@@ -287,23 +329,104 @@ func getJSON(t *testing.T, url string, out any) {
 	}
 }
 
-func postJSON(t *testing.T, url string, out any) {
+// redirectAnalysisLog points the write-only analysis audit log at a per-test
+// temporary file, so the suite never writes into the repository's data
+// directory.
+func redirectAnalysisLog(t *testing.T) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", nil)
+	handlers.SetAnalysisLogPath(filepath.Join(t.TempDir(), "analyses.json"))
+}
+
+// analysisCreatedBody is the 202 body of POST /api/ai/analyze.
+type analysisCreatedBody struct {
+	AnalysisID string `json:"analysisId"`
+	MeterID    string `json:"meter_id"`
+	Status     string `json:"status"`
+}
+
+// analysisBody mirrors the frozen GET /api/ai/analysis/{id} contract.
+type analysisBody struct {
+	AnalysisID string `json:"analysisId"`
+	MeterID    string `json:"meter_id"`
+	Status     string `json:"status"`
+	Stage      string `json:"stage"`
+	Progress   struct {
+		Done  int `json:"done"`
+		Total int `json:"total"`
+	} `json:"progress"`
+	StartedAt  string        `json:"started_at"`
+	FinishedAt *string       `json:"finished_at"`
+	Anomalies  []anomalyBody `json:"anomalies"`
+	Platform   *struct {
+		TotalAnomalies int `json:"total_anomalies"`
+		HighPriority   int `json:"high_priority"`
+	} `json:"platform"`
+	Error *string `json:"error"`
+}
+
+// postAnalyze starts an asynchronous analysis run for meterID and decodes the
+// 202 body. Any other status fails the test.
+func postAnalyze(t *testing.T, url, meterID string) analysisCreatedBody {
+	t.Helper()
+	body := strings.NewReader(fmt.Sprintf(`{"meter_id":%q}`, meterID))
+	resp, err := http.Post(url, "application/json", body)
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body for %s: %v", url, err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST %s: expected 200, got %d (body %s)", url, resp.StatusCode, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST %s: expected 202, got %d (body %s)", url, resp.StatusCode, raw)
 	}
-	if err := json.Unmarshal(body, out); err != nil {
-		t.Fatalf("decode %s: %v (body %s)", url, err, body)
+	var created analysisCreatedBody
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatalf("decode %s: %v (body %s)", url, err, raw)
 	}
+	return created
+}
+
+// waitForAnalysis polls GET /api/ai/analysis/{id} until the run reaches a
+// terminal status and returns the final body. The plain mock LLM finishes
+// instantly; the timeout only guards against a regression that would leave the
+// record non-terminal.
+func waitForAnalysis(t *testing.T, url, id string) analysisBody {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var body analysisBody
+		getJSON(t, url, &body)
+		switch body.Status {
+		case "completed":
+			return body
+		case "failed":
+			t.Fatalf("analysis %s failed: %v (body %+v)", id, body.Error, body)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("analysis %s did not reach a terminal status in time (last status %q, stage %q)", id, body.Status, body.Stage)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// gatedLLM parks its GenerateExplanation call until the test releases it, so a
+// test can observe an asynchronous analysis run in a real intermediate state.
+type gatedLLM struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newGatedLLM() *gatedLLM {
+	return &gatedLLM{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *gatedLLM) GenerateExplanation(models.Evidence) (string, error) {
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
+	return "narrativa de prueba", nil
 }
 
 // TestHealthEndpoint fixes the previous failure: the router is driven directly,
@@ -719,32 +842,105 @@ func TestAnomalyDetailUnknownReturnsNotFound(t *testing.T) {
 func TestAnalyzeReRunsPipelineAndStoresResult(t *testing.T) {
 	server, _ := newTestEnvironment(t)
 
-	var created struct {
-		AnalysisID string `json:"analysisId"`
-	}
-	postJSON(t, server.URL+"/api/ai/analyze", &created)
+	created := postAnalyze(t, server.URL+"/api/ai/analyze", stableMeter)
 	if created.AnalysisID == "" {
 		t.Fatal("expected a non-empty analysisId")
 	}
-
-	var result struct {
-		AnalysisID string        `json:"analysisId"`
-		Status     string        `json:"status"`
-		Anomalies  []anomalyBody `json:"anomalies"`
+	if created.MeterID != stableMeter {
+		t.Fatalf("expected meter_id %q in the create response, got %q", stableMeter, created.MeterID)
 	}
-	getJSON(t, server.URL+"/api/ai/analysis/"+created.AnalysisID, &result)
+	if created.Status != "queued" {
+		t.Fatalf("expected the run to be queued on creation, got %q", created.Status)
+	}
+
+	result := waitForAnalysis(t, server.URL+"/api/ai/analysis/"+created.AnalysisID, created.AnalysisID)
 
 	if result.AnalysisID != created.AnalysisID {
 		t.Fatalf("expected analysisId %q, got %q", created.AnalysisID, result.AnalysisID)
 	}
+	if result.MeterID != stableMeter {
+		t.Fatalf("expected meter_id %q, got %q", stableMeter, result.MeterID)
+	}
 	if result.Status != "completed" {
 		t.Fatalf("expected status completed, got %q", result.Status)
+	}
+	if result.Stage != "completed" {
+		t.Fatalf("expected stage completed, got %q", result.Stage)
+	}
+	if result.Progress.Total != 7 || result.Progress.Done != 7 {
+		t.Fatalf("expected progress 7/7, got %d/%d", result.Progress.Done, result.Progress.Total)
+	}
+	if result.Error != nil {
+		t.Fatalf("expected a nil error on a completed run, got %q", *result.Error)
 	}
 	if len(result.Anomalies) != 1 {
 		t.Fatalf("expected 1 stored anomaly, got %d", len(result.Anomalies))
 	}
+	if result.Anomalies[0].MeterID != stableMeter {
+		t.Fatalf("expected only the requested meter's anomalies, got %+v", result.Anomalies[0])
+	}
 	if result.Anomalies[0].Severity != "HIGH" || result.Anomalies[0].Type != "REAL_ANOMALY" {
 		t.Fatalf("expected the real pipeline values in the stored result, got %+v", result.Anomalies[0])
+	}
+	// The platform counts cover the whole run, not just the requested meter.
+	if result.Platform == nil {
+		t.Fatal("expected the platform block on a completed run")
+	}
+	if result.Platform.TotalAnomalies != 1 || result.Platform.HighPriority != 1 {
+		t.Fatalf("expected platform counts 1/1, got %+v", *result.Platform)
+	}
+}
+
+// TestAnalyzeProgressesFromQueuedToCompleted is the single focused test for the
+// asynchronous contract: the POST answers 202 with a queued run, the GET exposes
+// a real intermediate running stage while the narrative call is parked, and the
+// run reaches completed with the meter's anomaly and the platform counts.
+func TestAnalyzeProgressesFromQueuedToCompleted(t *testing.T) {
+	llm := newGatedLLM()
+	server := newDetectOnlyEnvironment(t, llm)
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(llm.release) }) }
+	defer release() // never leak the worker goroutine if an assertion fails
+
+	created := postAnalyze(t, server.URL+"/api/ai/analyze", stableMeter)
+	if created.Status != "queued" {
+		t.Fatalf("expected the POST to report a queued run, got %q", created.Status)
+	}
+
+	// Wait until the run is parked inside its narrative call. The explicacion
+	// stage is reported immediately before that call, so this is deterministic.
+	select {
+	case <-llm.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the narrative stage never started")
+	}
+
+	var mid analysisBody
+	getJSON(t, server.URL+"/api/ai/analysis/"+created.AnalysisID, &mid)
+	if mid.Status != "running" {
+		t.Fatalf("expected a running status while the narrative is parked, got %q", mid.Status)
+	}
+	if mid.Stage != "explicacion" {
+		t.Fatalf("expected stage explicacion while the narrative is parked, got %q", mid.Stage)
+	}
+	if mid.Progress.Done != 5 || mid.Progress.Total != 7 {
+		t.Fatalf("expected progress 5/7 during the narrative stage, got %d/%d", mid.Progress.Done, mid.Progress.Total)
+	}
+
+	release()
+	result := waitForAnalysis(t, server.URL+"/api/ai/analysis/"+created.AnalysisID, created.AnalysisID)
+	if result.Status != "completed" || result.Stage != "completed" {
+		t.Fatalf("expected a completed run, got status %q stage %q", result.Status, result.Stage)
+	}
+	if result.Progress.Done != 7 || result.Progress.Total != 7 {
+		t.Fatalf("expected progress 7/7 on completion, got %d/%d", result.Progress.Done, result.Progress.Total)
+	}
+	if len(result.Anomalies) != 1 || result.Anomalies[0].MeterID != stableMeter {
+		t.Fatalf("expected exactly the meter's anomaly, got %+v", result.Anomalies)
+	}
+	if result.Platform == nil || result.Platform.TotalAnomalies != 1 || result.Platform.HighPriority != 1 {
+		t.Fatalf("expected platform counts 1/1, got %+v", result.Platform)
 	}
 }
 
@@ -913,10 +1109,7 @@ func TestOrchestratorRunTwiceDoesNotDuplicateReadings(t *testing.T) {
 func TestConcurrentRequestsAreRaceFree(t *testing.T) {
 	server, _ := newTestEnvironment(t)
 
-	var created struct {
-		AnalysisID string `json:"analysisId"`
-	}
-	postJSON(t, server.URL+"/api/ai/analyze", &created)
+	created := postAnalyze(t, server.URL+"/api/ai/analyze", stableMeter)
 
 	const workers = 16
 	done := make(chan string, workers)
@@ -941,4 +1134,7 @@ func TestConcurrentRequestsAreRaceFree(t *testing.T) {
 			t.Fatalf("concurrent request failed: %s", msg)
 		}
 	}
+
+	// The run must still reach a terminal state after all the concurrent reads.
+	waitForAnalysis(t, server.URL+"/api/ai/analysis/"+created.AnalysisID, created.AnalysisID)
 }
