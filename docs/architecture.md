@@ -60,6 +60,8 @@ dataset incluido, tarda entre uno y dos minutos y medio.
 | `LLM_API_KEY` | `llm.api_key` | `""` |
 | `LLM_BASE_URL` | `llm.base_url` | `https://ollama.com` |
 | `LLM_MODEL` | `llm.model` | `gpt-oss:20b` |
+| `USERS_CSV` | `data.users_csv` | `data/users.csv` |
+| `JWT_SECRET` | `auth.jwt_secret` | `""` (el handler de login cae a un secreto de desarrollo documentado) |
 
 `server.port` **no tiene binding de entorno**: se cambia solo por `config.yaml`.
 El comentario de `config.go` menciona `SERVER_PORT` con default `8080`, pero el
@@ -93,11 +95,11 @@ internal/api/                capa HTTP (net/http puro, sin framework)
   router.go                  registro de rutas y CORS
   handlers/endpoints.go      DTOs y handlers de lectura
   handlers/ai.go             detalle, análisis y dashboard
-internal/config/config.go    configuración con Viper
+internal/config/config.go    configuración con Viper (incluye el secreto de firma del login)
 internal/data/csv/           parser de CSV tolerante
 internal/data/memory/        repositorios en memoria
 internal/domain/models/      modelos de dominio y enums
-data/                        readings.csv y events.csv
+data/                        readings.csv, events.csv y users.csv (credencial de la demo de login)
 docs/                        documentación (mixta: endpoints/routing/plan en inglés,
                              requerimientos y architecture en español)
 odd/                         registro de features trabajadas (español)
@@ -589,9 +591,27 @@ CORS: `Access-Control-Allow-Origin: *`, métodos `GET, POST, OPTIONS`, headers
 | 8 | `POST /api/ai/analyze` | re-corre el pipeline y guarda un snapshot bajo un UUID |
 | 9 | `GET /api/ai/analysis/{id}` | el snapshot guardado, con `status: "completed"` |
 | 10 | `GET /api/dashboard/summary` | contadores agregados del dashboard |
+| 11 | `POST /api/auth/login` | login de la demo: valida `data/users.csv` y emite un JWT HS256 |
 
 Notas de contrato que conviene conocer:
 
+- **`POST /api/auth/login` emite el token y nada más.** La tienda de credenciales
+  es el CSV versionado `data/users.csv` (encabezado más una fila, con el password
+  como digest SHA-256; no hay base de datos por diseño), y el 200 devuelve
+  `token`, `expires_at` en RFC3339 y el objeto `user`. El token es un JWS
+  **HS256** con las claims `sub`, `name`, `authorized`, `iat` y `exp` a 8 horas,
+  armado solo con la biblioteca estándar y firmado con `JWT_SECRET` (con secreto
+  de desarrollo documentado cuando la variable no está seteada).
+- **El backend no valida ese token en ninguna otra ruta**, y es deliberado: no
+  hay middleware de autenticación ni de validación de JWT. El alcance pedido para
+  esta demo de flujo de login es *"el backend sólo debe devolver un JWT"*, así que
+  la ausencia de validación es una **decisión de alcance explícita**, no un
+  middleware faltante. Como ninguna ruta valida el token, el guard del frontend es
+  **UX, no una frontera de seguridad**: cualquiera que llame a la API directamente
+  no necesita token para leer los endpoints existentes.
+- El `401` de `/api/auth/login` responde **el mismo cuerpo** para un usuario
+  inexistente y para un password incorrecto, para no enumerar usuarios, y un
+  usuario con la columna `authorized` en `false` recibe `403`.
 - El id de anomalía es **compuesto**: `<meter_id>-<detected_at en RFC3339 UTC>`.
   El listado y el detalle coinciden exactamente.
 - `POST /api/ai/analyze` **no lee body** y es **sincrónico**: corre `Run()` (que

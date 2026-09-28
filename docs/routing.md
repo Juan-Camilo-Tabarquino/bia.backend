@@ -44,6 +44,7 @@ func NewRouter(orchestrator *analysis.Orchestrator) http.Handler {
     mux.Handle("/api/ai/analyze", corsWrapper(handlers.AnalyzePOST(orchestrator)))
     mux.Handle("/api/ai/analysis/", corsWrapper(http.HandlerFunc(handlers.AnalysisGET)))
     mux.Handle("/api/dashboard/summary", corsWrapper(handlers.DashboardSummary(orchestrator)))
+    mux.Handle("/api/auth/login", corsWrapper(http.HandlerFunc(handlers.AuthLogin)))
 
     return mux
 }
@@ -67,6 +68,7 @@ path variables each handler extracts from `r.URL.Path`.
 | POST | `/api/ai/analyze` | Re-run the pipeline and return a new analysis id. |
 | GET | `/api/ai/analysis/{id}` | Result of a previous analysis run. |
 | GET | `/api/dashboard/summary` | High-level counts for the dashboard. |
+| POST | `/api/auth/login` | Demo login: verifies the committed `data/users.csv` store and issues an HS256 JWT. It only issues the token; no route validates it. |
 
 See `docs/endpoints.md` for the parameters and JSON body of each route.
 

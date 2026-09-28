@@ -32,6 +32,7 @@ does not reject other methods.
 | POST | `/api/ai/analyze` | object `{"analysisId":"..."}` |
 | GET | `/api/ai/analysis/{id}` | object (analysis result) |
 | GET | `/api/dashboard/summary` | object (summary) |
+| POST | `/api/auth/login` | object `{"token":"...","expires_at":"...","user":{...}}` |
 
 All successful responses are JSON with `Content-Type: application/json`. Error
 bodies from the handlers are always JSON: `{"error":"<message>"}`.
@@ -366,6 +367,67 @@ Source: `internal/api/handlers/ai.go:25-29, 63-88`.
   not an anomaly, so no `type`, kind or severity is invented for them.
 
 Source: `internal/api/handlers/ai.go:91-118`.
+
+## POST /api/auth/login
+
+Demo login for the technical-test flow. There is no database by design: the
+credential store is the committed CSV `data/users.csv` (a header row plus one
+user, with the password stored as a SHA-256 hex digest). It is read on every
+request — one row makes the read negligible, and the credential stays editable
+without a restart. The path can be overridden with the `USERS_CSV` environment
+variable (default `data/users.csv`).
+
+- Request body (JSON):
+
+```json
+{ "username": "jcamilo", "password": "bia2026" }
+```
+
+- `200 OK` — valid credentials whose `authorized` column is `true`:
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJqY2FtaWxvIiwibmFtZSI6Ikp1YW4gQ2FtaWxvIiwiYXV0aG9yaXplZCI6dHJ1ZSwiaWF0IjoxNzkwNTU0NTc3LCJleHAiOjE3OTA1ODMzNzd9.2nHHXZc5fBlNotunjHxoti1mjSUVOEFYSheofvQC31s",
+  "expires_at": "2026-09-28T08:16:17Z",
+  "user": { "username": "jcamilo", "name": "Juan Camilo", "authorized": true }
+}
+```
+
+- Errors. Every body is `{"error":"<message>"}`:
+
+| Status | Body | When |
+|--------|------|------|
+| `401` | `{"error":"usuario o contraseña incorrectos"}` | unknown username **or** wrong password |
+| `403` | `{"error":"el usuario no está autorizado"}` | valid credential with `authorized: false` |
+| `400` | `{"error":"usuario y contraseña son obligatorios"}` | missing/empty `username` or `password`, or a body that is not valid JSON |
+| `405` | `{"error":"método no permitido"}` | any method other than `POST` (`OPTIONS` is answered `200` by `corsWrapper` first) |
+| `500` | the credential-store read error | `data/users.csv` is missing or malformed; a broken store is a server-side fault and never a `401` |
+
+The `401` body is deliberately **identical** for an unknown username and a wrong
+password, so the endpoint does not enumerate users. The supplied password is
+hashed before the lookup and the two hex digests are compared in constant time.
+
+### The token
+
+- Algorithm: `HS256` over a compact JWS,
+  `base64url(header).base64url(claims).base64url(HMAC-SHA256(...))`, built with
+  the standard library only (`crypto/hmac`, `crypto/sha256`, `encoding/base64`,
+  `encoding/json`). No third-party JWT package is used.
+- Header: `{"alg":"HS256","typ":"JWT"}`.
+- Claims: `sub` (username), `name`, `authorized` (boolean), `iat` and `exp` in
+  Unix seconds. Lifetime: **8 hours** (`exp - iat = 28800`).
+- `expires_at` is that same expiry rendered as RFC3339.
+- Secret: `JWT_SECRET`. When the variable is unset the handler falls back to a
+  documented development secret, so the demo needs no configuration at all; a
+  real deployment must set `JWT_SECRET`. Neither the secret nor the token is
+  logged, and the secret never appears in a response or an error message.
+
+The token is **issued only**: no other route validates it. That is a deliberate
+scope decision for this login-flow demo, not a missing middleware — see
+[`docs/architecture.md`](./architecture.md) §9. Because nothing validates the
+token, a frontend guard is UX, not a security boundary.
+
+Source: `internal/api/handlers/auth.go`, `internal/api/router.go`, `data/users.csv`.
 
 ---
 
