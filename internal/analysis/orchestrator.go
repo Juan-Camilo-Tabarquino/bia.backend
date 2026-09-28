@@ -3,6 +3,7 @@ package analysis
 import (
 	"log"
 	"sync"
+	"time"
 
 	"github.com/neuralium/ai-energy/internal/data/csv"
 	"github.com/neuralium/ai-energy/internal/data/memory"
@@ -48,7 +49,7 @@ type Orchestrator struct {
 	LLM             LLMClient
 	EvidenceBuilder EvidenceBuilder
 
-	// mu protects evidence/dataGaps/loaded/generation. It is held only for short
+	// mu protects evidence/dataGaps/loaded/generation/lastRun. It is held only for short
 	// mutations and brief reads: Detect publishes the deterministic snapshot
 	// under a short write lock and Enrich writes each LLM narrative under a
 	// short write lock per item. It is deliberately NOT held across the slow LLM
@@ -69,6 +70,11 @@ type Orchestrator struct {
 	// has been superseded. A changed generation is the proof that a republish
 	// happened. Protected by mu.
 	generation uint64
+	// lastRun is the wall-clock (UTC) time of the last Detect that published a
+	// snapshot. It is recorded in the same critical section as evidence and
+	// generation, so it always matches the snapshot the API is serving. It is the
+	// zero time until the first Detect. Protected by mu.
+	lastRun time.Time
 }
 
 func NewOrchestrator(loader *csv.Loader, rrepo *memory.ReadingRepo, erepo *memory.EventRepo,
@@ -156,6 +162,7 @@ func (o *Orchestrator) detect(report func(stage string)) error {
 	// look item by item.
 	o.evidence = built
 	o.dataGaps = gaps
+	o.lastRun = time.Now().UTC()
 	o.generation++
 	o.mu.Unlock()
 	return nil
@@ -364,4 +371,21 @@ func (o *Orchestrator) DataGaps() []DataGap {
 	out := make([]DataGap, len(o.dataGaps))
 	copy(out, o.dataGaps)
 	return out
+}
+
+// LastRun returns the UTC time of the last Detect that published a snapshot,
+// rendered as RFC3339. It is the value GET /api/dashboard/summary publishes as
+// lastRun.
+//
+// Before the first Detect the time is genuinely unknown, so this returns an
+// empty string. The dashboard summary therefore always carries the lastRun key
+// (it never disappears), and the client can treat "" as "no run has published
+// yet" without branching on a missing field.
+func (o *Orchestrator) LastRun() string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.lastRun.IsZero() {
+		return ""
+	}
+	return o.lastRun.UTC().Format(time.RFC3339)
 }
