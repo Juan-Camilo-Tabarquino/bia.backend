@@ -393,6 +393,12 @@ variable (default `data/users.csv`).
 }
 ```
 
+Ese token es un **ejemplo real capturado de la suite de tests** y está firmado con
+el secreto que la suite fija (`test-only-signing-secret`), no con el fallback de
+desarrollo. Su estructura, sus claims y su `exp` son los del contrato, pero **no
+valida** contra `bia-demo-only-jwt-secret-do-not-use-in-production`: para
+comprobar una firma, usá un token emitido por el servidor que estés corriendo.
+
 - Errors. Every body is `{"error":"<message>"}`:
 
 | Status | Body | When |

@@ -60,8 +60,14 @@ dataset incluido, tarda entre uno y dos minutos y medio.
 | `LLM_API_KEY` | `llm.api_key` | `""` |
 | `LLM_BASE_URL` | `llm.base_url` | `https://ollama.com` |
 | `LLM_MODEL` | `llm.model` | `gpt-oss:20b` |
-| `USERS_CSV` | `data.users_csv` | `data/users.csv` |
-| `JWT_SECRET` | `auth.jwt_secret` | `""` (el handler de login cae a un secreto de desarrollo documentado) |
+| `USERS_CSV` | — | `data/users.csv` |
+| `JWT_SECRET` | — | `""` (el handler de login cae a un secreto de desarrollo documentado) |
+
+Las dos variables de login **no pasan por `config`**: las resuelve el handler
+directamente con `os.Getenv`, porque `NewRouter` lo registra como un `HandlerFunc`
+sin estado y no le inyecta la `Config`. Por eso la columna de clave de
+configuración queda vacía en esas dos filas: no existe ninguna clave de Viper que
+las lea, y poner una `auth.*` en `config.yaml` no tendría efecto.
 
 `server.port` **no tiene binding de entorno**: se cambia solo por `config.yaml`.
 El comentario de `config.go` menciona `SERVER_PORT` con default `8080`, pero el
@@ -95,7 +101,7 @@ internal/api/                capa HTTP (net/http puro, sin framework)
   router.go                  registro de rutas y CORS
   handlers/endpoints.go      DTOs y handlers de lectura
   handlers/ai.go             detalle, análisis y dashboard
-internal/config/config.go    configuración con Viper (incluye el secreto de firma del login)
+internal/config/config.go    configuración con Viper (puerto, CSVs del pipeline y ajustes del LLM; el secreto del login NO pasa por acá, lo resuelve el handler)
 internal/data/csv/           parser de CSV tolerante
 internal/data/memory/        repositorios en memoria
 internal/domain/models/      modelos de dominio y enums
