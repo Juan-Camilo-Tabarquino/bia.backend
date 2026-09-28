@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/neuralium/ai-energy/internal/analysis"
@@ -18,12 +20,88 @@ func Health(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// Meter list
+// meterSummaryDTO is one element of the GET /api/meters response. It feeds the
+// dashboard cards directly: the meter's period consumption, its health status
+// and the reading count/timestamp already published by the meter detail
+// endpoint, so the cards and the detail view agree without a follow-up request
+// per meter.
+type meterSummaryDTO struct {
+	ID            string  `json:"id"`
+	Consumption   float64 `json:"consumption"`
+	Status        string  `json:"status"`
+	ReadingsCount int     `json:"readings_count"`
+	LastReadingAt string  `json:"last_reading_at"`
+}
+
+// meterReadingsSummary is the derived, read-only view of one meter's readings.
+// It is computed by summarizeMeterReadings and consumed by both GET /api/meters
+// and GET /api/meters/{meterId}, so the status rule, the reading count and the
+// last-reading timestamp cannot drift between the two endpoints.
+type meterReadingsSummary struct {
+	status       string
+	count        int
+	firstReading time.Time
+	lastReading  time.Time
+	consumption  float64
+}
+
+// summarizeMeterReadings derives the shared per-meter values in a single pass.
+// A meter is "OK" only when every reading carries an OK status (trimmed,
+// case-insensitive); otherwise it is "DEGRADED". consumption sums the readings'
+// Consumption. An empty slice yields "OK" with zero values, so the helper never
+// panics on a meter with no readings.
+func summarizeMeterReadings(readings []models.Reading) meterReadingsSummary {
+	summary := meterReadingsSummary{status: "OK"}
+	for i, reading := range readings {
+		if !strings.EqualFold(strings.TrimSpace(reading.Status), "OK") {
+			summary.status = "DEGRADED"
+		}
+		if i == 0 || reading.Timestamp.Before(summary.firstReading) {
+			summary.firstReading = reading.Timestamp
+		}
+		if i == 0 || reading.Timestamp.After(summary.lastReading) {
+			summary.lastReading = reading.Timestamp
+		}
+		summary.consumption += reading.Consumption
+	}
+	summary.count = len(readings)
+	return summary
+}
+
+// roundOneDecimal rounds a kWh total to the one-decimal precision the meter
+// cards publish, so float summation noise never leaks into the JSON.
+func roundOneDecimal(v float64) float64 {
+	return math.Round(v*10) / 10
+}
+
+// GET /api/meters – list of meter summaries.
+//
+// The response is a bare JSON array of meterSummaryDTO objects, sorted by id so
+// the UI array order is stable across requests. NOTE: this is a deliberate
+// BREAKING change from the previous bare array of id strings; the dashboard
+// cards need each meter's consumption, and this endpoint feeds them without one
+// follow-up request per meter.
 func Meters(rrepo *memory.ReadingRepo) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		ids := rrepo.AllMeterIDs()
-		json.NewEncoder(w).Encode(ids)
+		sort.Strings(ids)
+		out := make([]meterSummaryDTO, 0, len(ids))
+		for _, id := range ids {
+			summary := summarizeMeterReadings(rrepo.ReadingsFor([]string{id}, nil, nil))
+			lastReadingAt := ""
+			if !summary.lastReading.IsZero() {
+				lastReadingAt = summary.lastReading.UTC().Format(time.RFC3339)
+			}
+			out = append(out, meterSummaryDTO{
+				ID:            id,
+				Consumption:   roundOneDecimal(summary.consumption),
+				Status:        summary.status,
+				ReadingsCount: summary.count,
+				LastReadingAt: lastReadingAt,
+			})
+		}
+		json.NewEncoder(w).Encode(out)
 	}
 }
 

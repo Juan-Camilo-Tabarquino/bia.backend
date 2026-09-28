@@ -589,14 +589,14 @@ CORS: `Access-Control-Allow-Origin: *`, métodos `GET, POST, OPTIONS`, headers
 |---|---|---|
 | 1 | `GET /api/health` | liveness: devuelve `{"status":"ok"}` |
 | 2 | `GET /api/reports` | evidencia cruda, con la forma del modelo de dominio |
-| 3 | `GET /api/meters` | array pelado de ids de medidor |
+| 3 | `GET /api/meters` | array de resúmenes por medidor (id, consumo, estado, cantidad de lecturas, último timestamp), ordenado por id |
 | 4 | `GET /api/meters/{meterId}` | metadata del medidor; 404 si no existe |
 | 5 | `GET /api/meters/{meterId}/readings` | lecturas, con `from`/`to` RFC3339 opcionales |
 | 6 | `GET /api/anomalies` | array de anomalías ordenado por prioridad |
 | 7 | `GET /api/anomalies/{id}` | una anomalía por id compuesto `meterID-<RFC3339 UTC>` |
 | 8 | `POST /api/ai/analyze` | arranca un análisis **por medidor**: responde `202` con un `analysisId` y corre el pipeline en segundo plano |
 | 9 | `GET /api/ai/analysis/{id}` | el estado vivo del análisis: `status`, etapa, progreso y, al completar, las anomalías del medidor |
-| 10 | `GET /api/dashboard/summary` | contadores agregados del dashboard |
+| 10 | `GET /api/dashboard/summary` | contadores agregados del dashboard más `total_consumption` y `lastRun` |
 | 11 | `POST /api/auth/login` | login de la demo: valida `data/users.csv` y emite un JWT HS256 |
 
 Notas de contrato que conviene conocer:
@@ -646,6 +646,20 @@ Notas de contrato que conviene conocer:
   anomalía, así que no se inventa un `type`, un `Kind` ni una severidad para
   ellos. La clave está presente incluso con `count` en `0`, para que la forma de
   la respuesta sea estable.
+- `GET /api/meters` cambió de forma (**breaking**): antes devolvía un array pelado
+  de **ids** (`["T-1","T-2"]`) y ahora devuelve un array de **objetos resumen**
+  ordenado por `id`, con las claves `id`, `consumption`, `status`,
+  `readings_count` y `last_reading_at`. `consumption` es el total del período en
+  kWh (suma de las lecturas del medidor, redondeado a un decimal); `status`,
+  `readings_count` y `last_reading_at` salen del mismo helper que usa
+  `GET /api/meters/{meterId}`, así que las tarjetas y el detalle no pueden
+  discrepar. El cambio es deliberado: es la única forma de alimentar las tarjetas
+  con el consumo por medidor sin una request extra por medidor.
+- `GET /api/dashboard/summary` agrega `total_consumption` (suma de `Consumption`
+  de todas las lecturas cargadas, redondeada a un decimal) y reemplaza el literal
+  `"latest"` de `lastRun` por el timestamp RFC3339 UTC del último `Detect()` que
+  publicó un snapshot, expuesto por `Orchestrator.LastRun()`. Antes del primer
+  `Detect()` es `""` (la clave siempre está presente).
 - `/api/reports` serializa el modelo de dominio `models.Evidence`, no el DTO. Sus
   claves JSON son por lo tanto nombres de campo Go (`MeterID`, `Baseline`), a
   diferencia de `/api/anomalies`, que usa los DTO con claves en snake_case.

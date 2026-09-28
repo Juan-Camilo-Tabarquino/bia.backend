@@ -402,11 +402,33 @@ func DashboardSummary(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 		for _, gap := range gaps {
 			meterIDs = append(meterIDs, gap.MeterID)
 		}
+		// total_consumption is the sum of Consumption over every reading loaded,
+		// across all meters, rounded to one decimal to match the per-meter
+		// consumption published by GET /api/meters (a raw float sum leaks
+		// representation noise such as 155250.8499999999).
+		//
+		// The ids are sorted before summing because AllMeterIDs reads a map, so its
+		// order is randomised per call. Float addition is not associative and the
+		// bundled dataset's exact total sits on the .x5 rounding boundary, so
+		// summing in map order makes this KPI flip between 155250.8 and 155250.9
+		// for identical requests. Sorting pins the accumulation order, and with it
+		// the answer; do not "simplify" this away.
+		allMeterIDs := orchestrator.ReadingRepo.AllMeterIDs()
+		sort.Strings(allMeterIDs)
+		totalConsumption := 0.0
+		for _, reading := range orchestrator.ReadingRepo.ReadingsFor(allMeterIDs, nil, nil) {
+			totalConsumption += reading.Consumption
+		}
 		summary := map[string]any{
-			"health":    "ok",
-			"meters":    len(orchestrator.ReadingRepo.AllMeterIDs()),
-			"anomalies": len(orchestrator.Evidence()),
-			"lastRun":   "latest", // placeholder
+			"health":            "ok",
+			"meters":            len(allMeterIDs),
+			"anomalies":         len(orchestrator.Evidence()),
+			"total_consumption": roundOneDecimal(totalConsumption),
+			// lastRun is the RFC3339 UTC time of the last Detect that published a
+			// snapshot, read from the orchestrator (the same critical section that
+			// publishes the evidence). It REPLACES the old literal "latest"
+			// placeholder. Before the first Detect it is the empty string.
+			"lastRun": orchestrator.LastRun(),
 			// unvalidatedMeters reports the meters that survived the quality
 			// check but could not be validated (too few readings for a baseline).
 			// The key is ALWAYS present, even with a count of 0, so the response
@@ -444,26 +466,18 @@ func MeterDetail(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("medidor %s no encontrado", id))
 			return
 		}
-		sort.Slice(readings, func(i, j int) bool {
-			return readings[i].Timestamp.Before(readings[j].Timestamp)
-		})
-		// A meter is healthy only when every reading carries an OK status.
-		status := "OK"
-		for _, reading := range readings {
-			if !strings.EqualFold(strings.TrimSpace(reading.Status), "OK") {
-				status = "DEGRADED"
-				break
-			}
-		}
+		// Derive status, count and the first/last timestamps through the same
+		// helper the meters list uses, so the cards and this detail never disagree.
+		summary := summarizeMeterReadings(readings)
 		resp := meterDTO{
 			ID:            id,
 			MeterID:       id,
 			Name:          "", // no meter-name source exists in this project
 			Location:      "", // no meter-location source exists in this project
-			Status:        status,
-			CreatedAt:     readings[0].Timestamp.UTC().Format(time.RFC3339),
-			ReadingsCount: len(readings),
-			LastReadingAt: readings[len(readings)-1].Timestamp.UTC().Format(time.RFC3339),
+			Status:        summary.status,
+			CreatedAt:     summary.firstReading.UTC().Format(time.RFC3339),
+			ReadingsCount: summary.count,
+			LastReadingAt: summary.lastReading.UTC().Format(time.RFC3339),
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}

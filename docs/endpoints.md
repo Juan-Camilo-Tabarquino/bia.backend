@@ -24,7 +24,7 @@ does not reject other methods.
 |--------|------|---------------------------|
 | GET | `/api/health` | object `{"status":"ok"}` |
 | GET | `/api/reports` | object `{"reports":[...]}` |
-| GET | `/api/meters` | **bare array** of meter id strings |
+| GET | `/api/meters` | **bare array** of meter summary objects (breaking change) |
 | GET | `/api/meters/{meterId}` | object (meter metadata) |
 | GET | `/api/meters/{meterId}/readings` | **bare array** of reading objects |
 | GET | `/api/anomalies` | **bare array** of anomaly objects |
@@ -132,17 +132,40 @@ Source: `internal/api/router.go:106-116`, `internal/domain/models/reading.go:107
 ## GET /api/meters
 
 - Parameters: none. Request body: none.
-- `200 OK` with a **bare JSON array of strings** — the meter identifiers, with no
-  wrapper object:
+- `200 OK` with a **bare JSON array of meter summary objects** — no wrapper
+  object. The array is **sorted by `id`** (ascending) so the UI order is stable
+  across requests:
 
 ```json
-["T-1", "T-2"]
+[
+  {
+    "id": "M-109",
+    "consumption": 17526,
+    "status": "OK",
+    "readings_count": 336,
+    "last_reading_at": "2026-09-14T23:00:00Z"
+  }
+]
 ```
 
-Order is map-iteration order (not sorted). With no meters loaded the body is `[]`.
+- **Breaking change.** This endpoint previously returned a bare array of meter
+  **id strings** (`["T-1","T-2"]`). It now returns **objects**. The change is
+  deliberate: the dashboard cards need each meter's consumption, and this is the
+  only way to feed them without one follow-up request per meter. A client that
+  consumed the id strings must now read the `id` field of each object.
+- `consumption` is the meter's **period total in kWh**: the sum of the
+  `Consumption` of every reading loaded for that meter, rounded to one decimal.
+- `status` is the same `OK` / `DEGRADED` value computed by
+  `GET /api/meters/{meterId}`: a meter is `DEGRADED` when any of its readings has
+  a status other than `OK` (trimmed, case-insensitive). Both endpoints share one
+  helper, so the two values cannot drift apart.
+- `readings_count` and `last_reading_at` are exactly the values
+  `GET /api/meters/{meterId}` returns for the same fields (`last_reading_at` is
+  the latest reading timestamp as UTC RFC3339), so the cards and the detail agree.
+- With no meters loaded the body is `[]`.
 
-Source: `internal/api/handlers/endpoints.go:22-28` (`AllMeterIDs` returns
-`[]string`, `internal/data/memory/repository.go:44`).
+Source: `internal/api/handlers/endpoints.go` (`Meters`, `summarizeMeterReadings`),
+`internal/data/memory/repository.go` (`AllMeterIDs`, `ReadingsFor`).
 
 ## GET /api/meters/{meterId}
 
@@ -171,7 +194,8 @@ Source: `internal/api/handlers/endpoints.go:22-28` (`AllMeterIDs` returns
   for them, so no values are invented.
 - Unknown meter: `404 Not Found` with `{"error":"medidor <meterId> no encontrado"}`.
 
-Source: `internal/api/handlers/ai.go:136-144, 424-473`.
+Source: `internal/api/handlers/ai.go` (`MeterDetail`),
+`internal/api/handlers/endpoints.go` (`summarizeMeterReadings`).
 
 ## GET /api/meters/{meterId}/readings
 
@@ -365,9 +389,10 @@ Source: `internal/api/handlers/ai.go`, `internal/api/handlers/analysislog.go`.
 ```json
 {
   "health": "ok",
-  "meters": 2,
-  "anomalies": 1,
-  "lastRun": "latest",
+  "meters": 12,
+  "anomalies": 4,
+  "total_consumption": 155250.8,
+  "lastRun": "2026-09-28T00:36:10Z",
   "unvalidatedMeters": {
     "count": 0,
     "meters": [],
@@ -378,8 +403,25 @@ Source: `internal/api/handlers/ai.go`, `internal/api/handlers/analysislog.go`.
 
 - `meters` is the current number of known meter ids, `anomalies` the number of
   evidence records produced by the last run.
-- `lastRun` is the literal placeholder string `"latest"`; the code does not
-  compute a timestamp for it.
+- `total_consumption` is the sum of `Consumption` over **every reading loaded**,
+  across all meters, rounded to one decimal. It mirrors the per-meter
+  `consumption` published by `GET /api/meters`.
+
+  The meter ids are **sorted before summing**, on purpose. `AllMeterIDs` reads a
+  map, so its order is randomised per call, and float addition is not
+  associative: the bundled dataset's exact total sits on the `.x5` rounding
+  boundary (`155250.85`), so summing in map order made this KPI flip between
+  `155250.8` and `155250.9` for identical requests. Sorting pins the accumulation
+  order. The `.1` digit of the example above is therefore stable, but it is a
+  boundary value: do not treat a one-tenth difference from another platform's
+  float arithmetic as a contract change.
+- `lastRun` is the **RFC3339 UTC timestamp** of the last `Detect()` that published
+  a snapshot, read from the orchestrator (it is recorded inside the same critical
+  section that publishes the evidence and bumps the snapshot generation). It
+  **replaces** the previous literal `"latest"` placeholder. Before the first
+  `Detect()` the value is the empty string `""`; the key is always present, so a
+  client can treat `""` as "no run has published yet" without branching on a
+  missing field.
 - `unvalidatedMeters` is always present, including when `count` is `0`, so the
   response shape is stable: `count` is the number of meters that passed the
   quality check but have no baseline because they carry fewer than 2 readings;
@@ -388,7 +430,8 @@ Source: `internal/api/handlers/ai.go`, `internal/api/handlers/analysislog.go`.
   These meters are intentionally **absent** from `/api/anomalies`: a data gap is
   not an anomaly, so no `type`, kind or severity is invented for them.
 
-Source: `internal/api/handlers/ai.go:396-423`.
+Source: `internal/api/handlers/ai.go` (`DashboardSummary`),
+`internal/analysis/orchestrator.go` (`LastRun`, `detect`).
 
 ## POST /api/auth/login
 

@@ -305,6 +305,16 @@ type readingBody struct {
 	Status      string
 }
 
+// meterSummaryBody mirrors one element of GET /api/meters: the meter summary
+// object the dashboard cards consume.
+type meterSummaryBody struct {
+	ID            string  `json:"id"`
+	Consumption   float64 `json:"consumption"`
+	Status        string  `json:"status"`
+	ReadingsCount int     `json:"readings_count"`
+	LastReadingAt string  `json:"last_reading_at"`
+}
+
 func getStatus(t *testing.T, url string) (int, string) {
 	t.Helper()
 	resp, err := http.Get(url)
@@ -480,13 +490,99 @@ func TestReportsEndpoint(t *testing.T) {
 func TestMetersListEndpoint(t *testing.T) {
 	server, _ := newTestEnvironment(t)
 
-	var ids []string
-	getJSON(t, server.URL+"/api/meters", &ids)
-	sort.Strings(ids)
+	var meters []meterSummaryBody
+	getJSON(t, server.URL+"/api/meters", &meters)
+	ids := make([]string, 0, len(meters))
+	for _, m := range meters {
+		ids = append(ids, m.ID)
+	}
 	want := []string{stableMeter, otherMeter}
 	sort.Strings(want)
 	if strings.Join(ids, ",") != strings.Join(want, ",") {
 		t.Fatalf("expected meters %v, got %v", want, ids)
+	}
+}
+
+// TestMetersListPublishesComputedConsumption pins the new GET /api/meters shape:
+// a bare array of meter summaries sorted by id, each carrying the meter's
+// period consumption (sum of its readings' Consumption, one decimal) plus the
+// status, count and last-reading timestamp that must agree with
+// GET /api/meters/{meterId}.
+func TestMetersListPublishesComputedConsumption(t *testing.T) {
+	server, _ := newTestEnvironment(t)
+
+	var meters []meterSummaryBody
+	getJSON(t, server.URL+"/api/meters", &meters)
+	if len(meters) != 2 {
+		t.Fatalf("expected 2 meters, got %d", len(meters))
+	}
+
+	// Sorted by id so the UI array order is stable between requests.
+	if meters[0].ID != stableMeter || meters[1].ID != otherMeter {
+		t.Fatalf("expected meters sorted as [%s %s], got [%s %s]",
+			stableMeter, otherMeter, meters[0].ID, meters[1].ID)
+	}
+
+	// T-1 burns 10 kWh for 23 hours plus 25 kWh at 12:00 = 255.0.
+	// T-2 burns 5 kWh for all 24 hours = 120.0.
+	byID := make(map[string]meterSummaryBody, len(meters))
+	for _, m := range meters {
+		byID[m.ID] = m
+	}
+	stable := byID[stableMeter]
+	if stable.Consumption != 255.0 {
+		t.Fatalf("expected stable meter consumption 255.0, got %v", stable.Consumption)
+	}
+	if other := byID[otherMeter]; other.Consumption != 120.0 {
+		t.Fatalf("expected other meter consumption 120.0, got %v", other.Consumption)
+	}
+	if stable.Status != "OK" || stable.ReadingsCount != 24 {
+		t.Fatalf("expected stable meter OK with 24 readings, got %q/%d", stable.Status, stable.ReadingsCount)
+	}
+
+	// The cards must agree with the detail endpoint field for field.
+	var detail struct {
+		Status        string `json:"status"`
+		ReadingsCount int    `json:"readings_count"`
+		LastReadingAt string `json:"last_reading_at"`
+	}
+	getJSON(t, server.URL+"/api/meters/"+stableMeter, &detail)
+	if stable.Status != detail.Status {
+		t.Fatalf("status disagrees with the detail endpoint: %q vs %q", stable.Status, detail.Status)
+	}
+	if stable.ReadingsCount != detail.ReadingsCount {
+		t.Fatalf("readings_count disagrees with the detail endpoint: %d vs %d", stable.ReadingsCount, detail.ReadingsCount)
+	}
+	if stable.LastReadingAt != detail.LastReadingAt {
+		t.Fatalf("last_reading_at disagrees with the detail endpoint: %q vs %q", stable.LastReadingAt, detail.LastReadingAt)
+	}
+	if stable.LastReadingAt != "2026-09-01T23:00:00Z" {
+		t.Fatalf("expected last_reading_at 2026-09-01T23:00:00Z, got %q", stable.LastReadingAt)
+	}
+}
+
+// TestDashboardSummaryPublishesTotalConsumptionAndLastRun pins the two new
+// summary fields: total_consumption is the sum of every loaded reading's
+// Consumption, and lastRun is a parseable RFC3339 timestamp produced by the
+// orchestrator (no longer the literal "latest" placeholder).
+func TestDashboardSummaryPublishesTotalConsumptionAndLastRun(t *testing.T) {
+	server, _ := newTestEnvironment(t)
+
+	var summary struct {
+		TotalConsumption float64 `json:"total_consumption"`
+		LastRun          string  `json:"lastRun"`
+	}
+	getJSON(t, server.URL+"/api/dashboard/summary", &summary)
+
+	// 2 meters x 24 readings: T-1 255.0 + T-2 120.0 = 375.0.
+	if summary.TotalConsumption != 375.0 {
+		t.Fatalf("expected total_consumption 375.0, got %v", summary.TotalConsumption)
+	}
+	if summary.LastRun == "" || summary.LastRun == "latest" {
+		t.Fatalf("expected a real lastRun timestamp, got %q", summary.LastRun)
+	}
+	if _, err := time.Parse(time.RFC3339, summary.LastRun); err != nil {
+		t.Fatalf("lastRun %q is not RFC3339: %v", summary.LastRun, err)
 	}
 }
 
