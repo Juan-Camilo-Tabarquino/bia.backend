@@ -100,6 +100,11 @@ func NewRouter(orchestrator *analysis.Orchestrator) http.Handler {
 	dashboard := corsWrapper(handlers.DashboardSummary(orchestrator))
 	mux.Handle("/api/dashboard/summary", dashboard)
 
+	// Demo login: verifies the committed CSV credential store and ISSUES an
+	// HS256 JWT. Deliberate scope decision: no other route validates that token,
+	// so the frontend guard is UX and not a security boundary (docs/architecture.md).
+	mux.Handle("/api/auth/login", corsWrapper(http.HandlerFunc(handlers.AuthLogin)))
+
 	return mux
 }
 

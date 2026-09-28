@@ -16,6 +16,14 @@ import (
 //	                 default https://ollama.com)
 //	LLM_MODEL     -> Ollama model in "model:tag" form (env var LLM_MODEL,
 //	                 default gpt-oss:20b)
+//	USERS_CSV     -> path to the demo login credential store (env var USERS_CSV,
+//	                 default data/users.csv). Resolved by the login handler
+//	                 (internal/api/handlers/auth.go), which the router registers
+//	                 as a stateless HandlerFunc, so it is not part of Config.
+//	JWT_SECRET    -> HS256 signing secret for POST /api/auth/login (env var
+//	                 JWT_SECRET). Optional: while it is empty the login handler
+//	                 falls back to its own documented development secret, so the
+//	                 demo runs with no configuration. Never log or publish it.
 //
 // Environment variables override values from config.yaml.
 // The function Load() reads config.yaml (if present), applies defaults, binds environment variables,
