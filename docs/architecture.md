@@ -3,7 +3,7 @@
 Documento de referencia del backend: qué hace, cómo está organizado, cómo funciona
 cada etapa del análisis, cómo se integra el LLM y qué se puede verificar.
 
-Describe el estado de `main` en el commit `e6536c7`. **Los identificadores,
+Describe el estado de `main` en el commit `ae889d4`. **Los identificadores,
 rutas, claves JSON, tokens de contrato y nombres de archivo se mantienen en
 inglés a propósito**: son parte del contrato técnico. La prosa va en español.
 
@@ -47,9 +47,9 @@ anuladas y un `config.yaml` en el directorio padre **no** se encuentra. Si falta
 `Load()` devuelve error y el proceso no arranca (`internal/config/config.go`).
 
 **Arranque esperado**: el puerto queda disponible en **menos de un segundo**. El
-pipeline determinístico corre sincrónicamente antes de escuchar; el
-enriquecimiento con LLM continúa en segundo plano y, con el proveedor real y el
-dataset incluido, tarda entre uno y dos minutos y medio.
+pipeline determinístico corre sincrónicamente antes de escuchar y publica la
+evidencia. El LLM **no** corre al arrancar: la narrativa se genera bajo demanda,
+por medidor, con `POST /api/ai/analyze` (ver §9 y §13).
 
 ### Variables de entorno
 
@@ -83,7 +83,7 @@ offline/demo, y arranca en 0 segundos.
 ## 3. Mapa del repositorio
 
 ```
-cmd/api/main.go              arranque: config -> stages -> Detect() sync -> go Enrich() -> ListenAndServe()
+cmd/api/main.go              arranque: config -> stages -> Detect() sync -> ListenAndServe()
 internal/analysis/           el pipeline determinístico (paquete plano)
   quality.go                 filtrado de lecturas
   baseline.go                estadísticas por medidor
@@ -94,6 +94,7 @@ internal/analysis/           el pipeline determinístico (paquete plano)
   evidenceBuilder.go         texto determinístico (motivo y acción)
   llm.go                     proveedor mock determinístico
   orchestrator.go            orquestación y concurrencia
+  gaps.go                    medidores sin línea base (menos de 2 lecturas), no validados
 internal/ai/                 integración con el LLM real
   provider.go                request a Ollama, selección de proveedor, prompt
   payload.go                 qué se le manda al modelo
@@ -101,6 +102,8 @@ internal/api/                capa HTTP (net/http puro, sin framework)
   router.go                  registro de rutas y CORS
   handlers/endpoints.go      DTOs y handlers de lectura
   handlers/ai.go             detalle, análisis y dashboard
+  handlers/auth.go           login de la demo: valida data/users.csv y emite un JWT HS256
+  handlers/analysislog.go    registro append-only de análisis terminados en data/analyses.json
 internal/config/config.go    configuración con Viper (puerto, CSVs del pipeline y ajustes del LLM; el secreto del login NO pasa por acá, lo resuelve el handler)
 internal/data/csv/           parser de CSV tolerante
 internal/data/memory/        repositorios en memoria
@@ -109,7 +112,7 @@ data/                        readings.csv, events.csv y users.csv (credencial de
 docs/                        documentación (mixta: endpoints/routing/plan en inglés,
                              requerimientos y architecture en español)
 odd/                         registro de features trabajadas (español)
-openspec/                    spec SDD en borrador (desactualizada, ver §13)
+openspec/                    spec SDD histórica/abandonada (marcada como tal; no es fuente vigente)
 ```
 
 **Decisiones de estructura que conviene saber:**
@@ -137,10 +140,12 @@ data/events.csv  ──┘                                │
                                                     │
                                           publica evidence  (lock breve)
                                                     │
-                       ┌────────────────────────────┴──────────────────┐
-                       v                                               v
-          http.ListenAndServe (API)                    Orchestrator.Enrich()  (background)
-          lee evidencia publicada                        LLM por anomalía -> LLMText
+                                                    v
+                                     http.ListenAndServe (API)
+                                     lee evidencia publicada
+                                                    │
+                                     POST /api/ai/analyze  (bajo demanda, por medidor)
+                                       RunMeter -> EnrichMeter -> LLMText
 ```
 
 El `Loader` **relee los CSV en cada `Detect()`**, así que un cambio en disco se
@@ -538,13 +543,14 @@ offline, y también está fijado por tests.
 4. `api.NewRouter(orchestrator)`.
 5. **`orchestrator.Detect()` sincrónico** — fatal si falla. Carga los CSV,
    corre el pipeline determinístico y **publica** la evidencia.
-6. **`go orchestrator.Enrich()`** en segundo plano — enriquece con el LLM.
-7. `http.ListenAndServe`.
+6. `http.ListenAndServe`.
 
-El orden importa: el punto 5 corre **antes** del 7, así que el puerto abre con la
-evidencia determinística ya publicada. Y el punto 6 va **después**, así que el
-puerto no espera al LLM. Antes de este diseño, el arranque tardaba ~69 segundos
-con el proveedor real, y el frontend recibía `ERR_CONNECTION_REFUSED`.
+El orden importa: el punto 5 corre **antes** del 6, así que el puerto abre con la
+evidencia determinística ya publicada. El LLM **no** se ejecuta en el arranque:
+la narrativa la produce una corrida bajo demanda de `POST /api/ai/analyze` por
+medidor (ver §9). Antes de este diseño, el arranque esperaba al enriquecimiento
+con el proveedor real (~69 segundos) y el frontend recibía
+`ERR_CONNECTION_REFUSED`.
 
 **El modelo de concurrencia** es un solo `sync.RWMutex` con una regla explícita:
 
@@ -732,7 +738,7 @@ La suite no se apoya en un solo test de integración: combina seis enfoques.
    ausente), `model`, `stream`, el mensaje único de rol `user`, substrings del
    prompt, la normalización de la base URL en cuatro formas y el payload JSON
    exacto.
-4. **Concurrencia, bajo `-race`**: que `Evidence()` no se bloquee durante el
+4. **Concurrencia** (escritos para poder correr bajo `-race`, ver la nota del final): que `Evidence()` no se bloquee durante el
    enriquecimiento, que `Detect` nunca llame al LLM, la publicación progresiva
    ítem por ítem, la tolerancia a un LLM nulo, y las dos regresiones de escritura
    sobre un snapshot superado.
@@ -754,7 +760,11 @@ go test ./...
 go test -race ./...
 ```
 
-El detector de carreras está disponible en este entorno (requiere `gcc`/`clang`).
+El detector de carreras necesita `cgo` y un compilador de C (`gcc`/`clang`). **Este entorno no lo tiene:**
+`go test -race` falla con `-race requires cgo`, y con `CGO_ENABLED=1` falla con
+`cgo: C compiler "gcc" not found`. La línea `-race` de arriba sólo aplica donde haya compilador; acá la
+garantía de no-carrera descansa en la inspección de los bloqueos y en la suite sin `-race` (punto 4),
+no en el detector.
 
 ---
 
@@ -799,8 +809,8 @@ Se listan porque son reales y están verificadas, no por completitud formal.
   entradas **finitas** enormes (por ejemplo `1e200`) da un desvío infinito;
   estructuralmente abierto, aunque impracticable con datos de medidores reales.
 - **Los handlers descartan el error de `json.Marshal`**: `writeJSON`
-  (`internal/api/handlers/endpoints.go:206`) y el handler de `/api/reports`
-  (`internal/api/router.go:112`) ignoran el error de `Encode`, así que cualquier
+  (`internal/api/handlers/endpoints.go:281`) y el handler de `/api/reports`
+  (`internal/api/router.go:117`) ignoran el error de `Encode`, así que cualquier
   valor no finito que llegue al payload responde **200 con cuerpo vacío** en vez
   de fallar ruidosamente con un 500. Es el mismo modo de falla que disparaba el
   `NaN` de una sola lectura, ahora alcanzable por la vía de los datos.
@@ -818,10 +828,13 @@ Se listan porque son reales y están verificadas, no por completitud formal.
 **En el arranque:**
 
 - **El arranque no bloquea, pero el puerto no tiene señal de readiness**: el
-  `GET /api/health` responde 200 desde el primer instante. Durante el
-  enriquecimiento, `llm_analysis` puede estar **ausente** del JSON (el campo es
-  `omitempty`, así que se omite la clave entera y no se emite `""`), mientras el
-  resto del payload ya es final y correcto.
+  `GET /api/health` responde 200 desde el primer instante. No hay ventana de
+  enriquecimiento al arrancar: `llm_analysis` lo escribe una corrida bajo demanda
+  de `POST /api/ai/analyze` para un medidor, y hasta que esa corrida completa el
+  campo puede estar **ausente** del JSON (es `omitempty`, así que se omite la
+  clave entera y no se emite `""`). El detalle de la anomalía muestra lo que haya
+  producido la última corrida, mientras el resto del payload determinístico ya es
+  final y correcto.
 - **Un modelo en vivo no es determinista**: la instrucción de idioma del prompt
   eleva la probabilidad de respuesta en español, pero no la garantiza contra otro
   modelo, otro proveedor u otra configuración.

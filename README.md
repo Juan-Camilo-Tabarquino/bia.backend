@@ -23,7 +23,7 @@ This will resolve and download any missing packages and clean the `go.mod` and `
 
 ```sh
 go build ./cmd/api
-./cmd/api/api
+./api
 ```
 
 

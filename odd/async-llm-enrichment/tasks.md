@@ -1,3 +1,10 @@
+> **Banner (corrección posterior).** La decisión de este documento de mantener
+> `POST /api/ai/analyze` **síncrono** (el non-goal de abajo y el work unit WU2)
+> fue **revertida** por el trabajo de análisis por medidor bajo demanda: hoy el
+> endpoint es **asíncrono** (responde `202` con un `analysisId` y el cliente
+> consulta `GET /api/ai/analysis/{id}`). El contrato vigente está en
+> `docs/endpoints.md`. El cuerpo de abajo se conserva tal como se escribió.
+
 # Feature: async-llm-enrichment
 
 **Branch:** `fix/non-blocking-startup`
