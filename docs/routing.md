@@ -60,14 +60,14 @@ path variables each handler extracts from `r.URL.Path`.
 |--------|------|---------|
 | GET | `/api/health` | Health check. |
 | GET | `/api/reports` | Evidence/report objects produced by the pipeline. |
-| GET | `/api/meters` | List of known meter identifiers. |
+| GET | `/api/meters` | Meter summaries for the dashboard cards: `id`, period `consumption`, `status`, `readings_count` and `last_reading_at`, sorted by id. |
 | GET | `/api/meters/{meterId}` | Metadata for a single meter. |
 | GET | `/api/meters/{meterId}/readings` | Readings for a meter, optionally filtered by `from`/`to`. |
 | GET | `/api/anomalies` | List of anomaly evidence. |
 | GET | `/api/anomalies/{id}` | Detail for one anomaly id. |
 | POST | `/api/ai/analyze` | Start a per-meter analysis (`{"meter_id":"…"}`); returns 202 with an analysis id. |
 | GET | `/api/ai/analysis/{id}` | Live state and, once finished, the result of that analysis run. |
-| GET | `/api/dashboard/summary` | High-level counts for the dashboard. |
+| GET | `/api/dashboard/summary` | High-level dashboard summary: counts, `total_consumption` and the `lastRun` timestamp. |
 | POST | `/api/auth/login` | Demo login: verifies the committed `data/users.csv` store and issues an HS256 JWT. It only issues the token; no route validates it. |
 
 See `docs/endpoints.md` for the parameters and JSON body of each route.
