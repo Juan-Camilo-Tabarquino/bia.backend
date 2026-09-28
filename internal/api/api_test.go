@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1137,4 +1138,164 @@ func TestConcurrentRequestsAreRaceFree(t *testing.T) {
 
 	// The run must still reach a terminal state after all the concurrent reads.
 	waitForAnalysis(t, server.URL+"/api/ai/analysis/"+created.AnalysisID, created.AnalysisID)
+}
+
+// --- Demo login: POST /api/auth/login ---------------------------------------
+
+// datasetUsersPath points at the real committed credential store, so the login
+// tests prove the shipped data/users.csv row matches the demo password instead
+// of a synthetic fixture.
+func datasetUsersPath() string { return filepath.Join("..", "..", "data", "users.csv") }
+
+// demoPasswordSHA256 is the digest of the demo plaintext password "bia2026". It
+// is pinned literally rather than recomputed, so a change to the shipped row or
+// to the hashing rule fails the test.
+const demoPasswordSHA256 = "5fc6e481e306643eb744ef706dc7a0622deb133525e6a53cd91607011040d2a5"
+
+// postBody posts a raw JSON body and returns the status and the trimmed response
+// body, so the login tests can pin the exact body of every non-200 branch.
+func postBody(t *testing.T, url, body string) (int, string) {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body for %s: %v", url, err)
+	}
+	return resp.StatusCode, strings.TrimSpace(string(raw))
+}
+
+// jwtSegment decodes one base64url segment of a compact JWS as a JSON object.
+func jwtSegment(t *testing.T, token string, index int) map[string]any {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token is not a compact JWS with three segments: %q", token)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[index])
+	if err != nil {
+		t.Fatalf("decode JWT segment %d: %v (token %q)", index, err, token)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal JWT segment %d: %v (raw %s)", index, err, raw)
+	}
+	return out
+}
+
+// TestAuthLoginIssuesDecodableToken pins the successful demo login end to end
+// against the committed users.csv: the accepted credential produces an RFC3339
+// expiry plus the user object, and the token is a real HS256 compact JWS whose
+// claims carry sub, name, authorized and the 8 hour window.
+func TestAuthLoginIssuesDecodableToken(t *testing.T) {
+	t.Setenv("USERS_CSV", datasetUsersPath())
+	// Pin the signing secret so the test never depends on an ambient JWT_SECRET.
+	t.Setenv("JWT_SECRET", "test-only-signing-secret")
+	server, _ := newTestEnvironment(t)
+
+	status, body := postBody(t, server.URL+"/api/auth/login", `{"username":"jcamilo","password":"bia2026"}`)
+	t.Logf("POST /api/auth/login -> %d %s", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body %s)", status, body)
+	}
+
+	var resp struct {
+		Token     string `json:"token"`
+		ExpiresAt string `json:"expires_at"`
+		User      struct {
+			Username   string `json:"username"`
+			Name       string `json:"name"`
+			Authorized bool   `json:"authorized"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode login body: %v (body %s)", err, body)
+	}
+	if resp.User.Username != "jcamilo" || resp.User.Name != "Juan Camilo" || !resp.User.Authorized {
+		t.Fatalf("unexpected user object: %+v", resp.User)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, resp.ExpiresAt)
+	if err != nil {
+		t.Fatalf("expires_at %q is not RFC3339: %v", resp.ExpiresAt, err)
+	}
+
+	header := jwtSegment(t, resp.Token, 0)
+	if header["alg"] != "HS256" || header["typ"] != "JWT" {
+		t.Fatalf("expected header alg HS256 / typ JWT, got %+v", header)
+	}
+	claims := jwtSegment(t, resp.Token, 1)
+	if claims["sub"] != "jcamilo" || claims["name"] != "Juan Camilo" || claims["authorized"] != true {
+		t.Fatalf("unexpected claims: %+v", claims)
+	}
+	issuedAt, okIat := claims["iat"].(float64)
+	expiresAtClaim, okExp := claims["exp"].(float64)
+	if !okIat || !okExp {
+		t.Fatalf("iat and exp must be numeric claims, got %+v", claims)
+	}
+	if delta := expiresAtClaim - issuedAt; int64(delta) != int64((8 * time.Hour).Seconds()) {
+		t.Fatalf("expected an 8 hour token window, got %v seconds", delta)
+	}
+	if drift := expiresAt.Sub(time.Unix(int64(expiresAtClaim), 0)); drift < -time.Second || drift > time.Second {
+		t.Fatalf("expires_at %s disagrees with the exp claim %s", resp.ExpiresAt, time.Unix(int64(expiresAtClaim), 0).UTC())
+	}
+}
+
+// TestAuthLoginRejectsUnauthorizedCredentials pins the negative credential
+// branches: a wrong password and an unknown user answer the SAME 401 body (the
+// endpoint does not enumerate users), and a valid credential whose
+// authorized column is false answers 403.
+func TestAuthLoginRejectsUnauthorizedCredentials(t *testing.T) {
+	dir := t.TempDir()
+	usersPath := filepath.Join(dir, "users.csv")
+	usersCSV := "username,password_sha256,name,authorized\n" +
+		"jcamilo," + demoPasswordSHA256 + ",Juan Camilo,true\n" +
+		"blocked," + demoPasswordSHA256 + ",Bloqueado,false\n"
+	if err := os.WriteFile(usersPath, []byte(usersCSV), 0o600); err != nil {
+		t.Fatalf("write users csv: %v", err)
+	}
+	t.Setenv("USERS_CSV", usersPath)
+	t.Setenv("JWT_SECRET", "test-only-signing-secret")
+	server, _ := newTestEnvironment(t)
+
+	const wantUnauthorized = `{"error":"usuario o contraseña incorrectos"}`
+	status, body := postBody(t, server.URL+"/api/auth/login", `{"username":"jcamilo","password":"no-es-la-clave"}`)
+	if status != http.StatusUnauthorized || body != wantUnauthorized {
+		t.Fatalf("wrong password: expected 401 %s, got %d %s", wantUnauthorized, status, body)
+	}
+	status, unknown := postBody(t, server.URL+"/api/auth/login", `{"username":"no-existe","password":"bia2026"}`)
+	if status != http.StatusUnauthorized || unknown != wantUnauthorized {
+		t.Fatalf("unknown user: expected 401 %s, got %d %s", wantUnauthorized, status, unknown)
+	}
+	if unknown != body {
+		t.Fatalf("unknown user and wrong password must share one body: %q vs %q", unknown, body)
+	}
+
+	const wantForbidden = `{"error":"el usuario no está autorizado"}`
+	status, body = postBody(t, server.URL+"/api/auth/login", `{"username":"blocked","password":"bia2026"}`)
+	if status != http.StatusForbidden || body != wantForbidden {
+		t.Fatalf("unauthorized user: expected 403 %s, got %d %s", wantForbidden, status, body)
+	}
+}
+
+// TestAuthLoginRejectsMalformedRequest pins the two request-shape branches that
+// never reach credential checking: a missing field answers 400 and a method
+// other than POST answers 405.
+func TestAuthLoginRejectsMalformedRequest(t *testing.T) {
+	// Both branches return before the credential store is read, so this test
+	// deliberately does not set USERS_CSV.
+	server, _ := newTestEnvironment(t)
+
+	const want = `{"error":"usuario y contraseña son obligatorios"}`
+	status, body := postBody(t, server.URL+"/api/auth/login", `{"username":"jcamilo"}`)
+	if status != http.StatusBadRequest || body != want {
+		t.Fatalf("missing password: expected 400 %s, got %d %s", want, status, body)
+	}
+
+	methodStatus, methodBody := getStatus(t, server.URL+"/api/auth/login")
+	if methodStatus != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/auth/login: expected 405, got %d (body %s)", methodStatus, methodBody)
+	}
 }
