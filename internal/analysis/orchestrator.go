@@ -309,8 +309,8 @@ func (o *Orchestrator) EnrichMeter(meterID string, report func(stage string)) Me
 	}
 
 	// explicacion: the narrative call for this meter's evidence. There is at most
-	// one LLM call per evidence item, so a per-meter run narrates a single item
-	// instead of the four calls the whole-platform Enrich issues.
+	// one LLM call per evidence item, so a per-meter run narrates only the items
+	// that belong to this meter instead of the whole platform.
 	reportStage(report, StageExplicacion)
 	if o.LLM != nil {
 		for _, i := range indices {

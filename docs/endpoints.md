@@ -29,51 +29,55 @@ does not reject other methods.
 | GET | `/api/meters/{meterId}/readings` | **bare array** of reading objects |
 | GET | `/api/anomalies` | **bare array** of anomaly objects |
 | GET | `/api/anomalies/{id}` | object (anomaly object) |
-| POST | `/api/ai/analyze` | object `{"analysisId":"..."}` |
+| POST | `/api/ai/analyze` | object `{"analysisId":"...","meter_id":"...","status":"queued"}` (202) |
 | GET | `/api/ai/analysis/{id}` | object (analysis result) |
 | GET | `/api/dashboard/summary` | object (summary) |
 
 All successful responses are JSON with `Content-Type: application/json`. Error
 bodies from the handlers are always JSON: `{"error":"<message>"}`.
 
-## Startup warm-up and the LLM narrative window
+## Startup warm-up and on-demand LLM narration
 
 The server runs the deterministic pipeline synchronously at startup and begins
-serving roughly one second after launch. The LLM narrative enrichment then runs
-in the background; on the shipped dataset with the real provider it takes from
-about a minute up to a couple of minutes (repeatedly measured between 68 s and
-about 148 s across runs).
+serving roughly one second after launch. **The LLM does not run at startup.**
+The narrative is produced on demand, one meter at a time, by
+`POST /api/ai/analyze` and reported through `GET /api/ai/analysis/{id}`.
 
-- During that warm-up window, the `llm_analysis` field of an anomaly (and the
-  corresponding `llm_text` field of an evidence item in `GET /api/reports`) may
-  be the empty string. Because the field is `omitempty`, an empty narrative is
-  omitted from the JSON entirely, so the key may be absent rather than present
-  as `""`.
-- **Every other field is already complete and correct** from the first request:
-  `type`, `severity`, `confidence`, `reason`, `recommended_action`, `status`,
-  `priority`, the per-meter baseline, the change percentages, the correlated
-  events and the data-quality verdict all come from the deterministic pipeline
-  and are final at that point.
-- The narratives fill in progressively and are available from the same endpoint
-  on a later request with no client action required. No polling protocol, no
-  status field and no `503` state is introduced.
+> **Reversal of a previous contract.** An earlier version of this document
+> promised: *"The narratives fill in progressively and are available from the
+> same endpoint on a later request with no client action required. No polling
+> protocol, no status field and no `503` state is introduced."* That promise is
+> now **deliberately reversed.** The old whole-platform enrichment started a
+> background goroutine at boot, could take between 68 s and about 148 s, and
+> spent four LLM calls narrating meters the user never opened. The product now
+> needs a per-meter, user-triggered analysis with visible progress, so the
+> contract introduces exactly a polling protocol plus `status`/`stage` fields
+> and an asynchronous run. The sentence above is kept only as the record of
+> what changed and why.
+
+- The deterministic fields of an anomaly (`type`, `severity`, `confidence`,
+  `reason`, `recommended_action`, `status`, `priority`, the per-meter baseline,
+  the change percentages, the correlated events and the data-quality verdict)
+  are final from the first request and are never produced by the LLM.
+- `llm_analysis` is no longer filled in the background at boot. It is only
+  populated by a completed per-meter analysis, whose result carries both that
+  meter's anomalies and the whole-platform counts. Until a run for a meter
+  completes, `llm_analysis` is absent (the field is `omitempty`), exactly as
+  when no provider is configured.
 - `GET /api/health` is unaffected and keeps answering `200 {"status":"ok"}`
   immediately, from the first moment.
-- The warm-up window applies to the endpoints that read the live evidence:
-  `GET /api/anomalies`, `GET /api/anomalies/{id}`, `GET /api/reports` and
-  `GET /api/dashboard/summary`.
-- `GET /api/ai/analysis/{id}` is **not** affected. It only ever serves a snapshot
-  that a `POST /api/ai/analyze` stored, and that request enriches before it
-  stores, so the narratives in it are always populated.
-- `POST /api/ai/analyze` is likewise **not** affected: it re-runs the
-  deterministic stage and the enrichment in the same request, so it returns with
-  the narratives already populated. That request is expected to take from about a
-  minute up to a couple of minutes, and the frontend discloses the latency to the
-  user.
+- The endpoints that read the live evidence (`GET /api/anomalies`,
+  `GET /api/anomalies/{id}`, `GET /api/reports` and
+  `GET /api/dashboard/summary`) keep answering with the deterministic payload
+  and no longer change on their own after startup.
+- A run is bounded: a ~90 s watchdog and a `recover()` guard inside its
+  goroutine always leave a terminal `completed` or `failed` record, so a client
+  spinner can never hang. The provider itself caps each call at 60 s.
 
-Source: `cmd/api/main.go` (runs the deterministic stage synchronously, then the
-enrichment in a background goroutine), `internal/analysis/orchestrator.go`
-(`Detect`, `Enrich`).
+Source: `cmd/api/main.go` (runs the deterministic stage synchronously and starts
+no enrichment goroutine), `internal/analysis/orchestrator.go` (`Detect`,
+`RunMeter`/`EnrichMeter`), `internal/api/handlers/ai.go` (async run, watchdog,
+panic guard).
 
 ---
 
@@ -166,7 +170,7 @@ Source: `internal/api/handlers/endpoints.go:22-28` (`AllMeterIDs` returns
   for them, so no values are invented.
 - Unknown meter: `404 Not Found` with `{"error":"medidor <meterId> no encontrado"}`.
 
-Source: `internal/api/handlers/ai.go:32-41, 125-165`.
+Source: `internal/api/handlers/ai.go:136-144, 424-473`.
 
 ## GET /api/meters/{meterId}/readings
 
@@ -277,62 +281,80 @@ Source: `internal/api/handlers/endpoints.go:36-72, 113-169, 216-220`.
 - `200 OK` with a single anomaly object (same shape as a list element).
 - Unknown id: `404 Not Found` with `{"error":"anomalía <id> no encontrada"}`.
 
-Source: `internal/api/handlers/ai.go:169-186`, `internal/api/handlers/endpoints.go:104-106, 113-169`.
+Source: `internal/api/handlers/ai.go:474-491`, `internal/api/handlers/endpoints.go:104-106, 113-169`.
 
 ## POST /api/ai/analyze
 
 - Parameters: none.
-- Request body: **none is read.** The handler consumes no payload, so no body
-  fields are defined or validated.
-- Behaviour: re-runs the deterministic pipeline through the orchestrator
-  (idempotent — it does not duplicate stored readings) and stores an immutable
-  snapshot of the produced evidence under a new id.
-- `200 OK`:
+- Request body: JSON object with the target meter:
 
 ```json
-{ "analysisId": "3f1c9d4e-...-uuid" }
+{ "meter_id": "M-109" }
 ```
 
-- `500 Internal Server Error` if the pipeline run fails, with
-  `{"error":"<error message>"}`.
+- Behaviour: starts an **asynchronous, per-meter** analysis run. The handler
+  mints an id, records the run as `queued` and answers immediately; the pipeline
+  runs in a goroutine. The run executes the deterministic pipeline (global) and
+  then narrates **only the requested meter's** evidence, so it costs one LLM
+  call per anomaly instead of the whole-platform pass.
+- `202 Accepted`:
 
-Source: `internal/api/handlers/ai.go:44-60`.
+```json
+{ "analysisId": "3f1c9d4e-...-uuid", "meter_id": "M-109", "status": "queued" }
+```
+
+- If a run for the same meter is already `queued` or `running`, the response is
+  also `202` but carries the **existing** `analysisId` and its current status;
+  no second LLM call is started.
+- `400 Bad Request` when `meter_id` is missing or names an unknown meter, with
+  `{"error":"..."}`.
+- Poll `GET /api/ai/analysis/{analysisId}` for progress and the final result.
+
+Source: `internal/api/handlers/ai.go`.
 
 ## GET /api/ai/analysis/{id}
 
 - Path parameter: `id` — the `analysisId` returned by `POST /api/ai/analyze`.
 - Request body: none.
-- `200 OK`, real stored result of that run:
+- `200 OK`, live state of that run:
 
 ```json
 {
   "analysisId": "3f1c9d4e-...-uuid",
-  "status": "completed",
-  "anomalies": [
-    {
-      "id": "T-1-2026-09-01T12:00:00Z",
-      "meter_id": "T-1",
-      "detected_at": "2026-09-01T12:00:00Z",
-      "type": "REAL_ANOMALY",
-      "severity": "HIGH",
-      "confidence": 0.9,
-      "reason": "...",
-      "recommended_action": "...",
-      "status": "unexplained",
-      "llm_analysis": "..."
-    }
-  ]
+  "meter_id": "M-109",
+  "status": "queued | running | completed | failed",
+  "stage": "queued | lecturas | baseline | deteccion | correlacion | eventos | explicacion | recomendacion | completed | failed",
+  "progress": { "done": 0, "total": 7 },
+  "started_at": "2026-09-01T12:00:00Z",
+  "finished_at": "2026-09-01T12:00:20Z | null",
+  "anomalies": [],
+  "platform": { "total_anomalies": 4, "high_priority": 2 },
+  "error": null
 }
 ```
 
-The `anomalies` elements are the same anomaly object shape as `GET /api/anomalies`
-(`[]` when the run produced none).
-
+- `status` progresses `queued` → `running` → `completed`, or ends in `failed`.
+- `stage` is the current pipeline stage; `progress.done` is the number of the
+  seven stages that have settled, so a finished run reports
+  `{"done":7,"total":7}`. The stage order is `lecturas`, `baseline`,
+  `deteccion`, `correlacion`, `eventos`, `explicacion`, `recomendacion`.
+- `anomalies` is only populated when the run is `completed`, and contains
+  **only the requested meter's** anomalies, mapped through the same DTO and the
+  same ascending-priority ordering as `GET /api/anomalies` (`[]` when the meter
+  produced none).
+- `platform` is present when `completed`: `total_anomalies` is the
+  whole-platform evidence count and `high_priority` the number of those items
+  whose severity is `HIGH`, both produced by the same run. The frontend renders
+  it as "N anomalías detectadas · M requieren atención prioritaria".
+- `failed` carries a readable `error`. The ~90 s watchdog and the panic guard
+  inside the goroutine guarantee the record always reaches a terminal state.
 - Unknown id: `404 Not Found` with `{"error":"análisis <id> no encontrado"}`.
 - The store is an in-memory map in the process: ids are valid only for the
-  lifetime of the running process, and are lost on restart.
+  lifetime of the running process and are lost on restart. Terminal records are
+  appended, write-only, to `data/analyses.json`; that file is never read back
+  into the id space.
 
-Source: `internal/api/handlers/ai.go:25-29, 63-88`.
+Source: `internal/api/handlers/ai.go`, `internal/api/handlers/analysislog.go`.
 
 ## GET /api/dashboard/summary
 
@@ -365,7 +387,7 @@ Source: `internal/api/handlers/ai.go:25-29, 63-88`.
   These meters are intentionally **absent** from `/api/anomalies`: a data gap is
   not an anomaly, so no `type`, kind or severity is invented for them.
 
-Source: `internal/api/handlers/ai.go:91-118`.
+Source: `internal/api/handlers/ai.go:396-423`.
 
 ---
 

@@ -586,19 +586,29 @@ CORS: `Access-Control-Allow-Origin: *`, métodos `GET, POST, OPTIONS`, headers
 | 5 | `GET /api/meters/{meterId}/readings` | lecturas, con `from`/`to` RFC3339 opcionales |
 | 6 | `GET /api/anomalies` | array de anomalías ordenado por prioridad |
 | 7 | `GET /api/anomalies/{id}` | una anomalía por id compuesto `meterID-<RFC3339 UTC>` |
-| 8 | `POST /api/ai/analyze` | re-corre el pipeline y guarda un snapshot bajo un UUID |
-| 9 | `GET /api/ai/analysis/{id}` | el snapshot guardado, con `status: "completed"` |
+| 8 | `POST /api/ai/analyze` | arranca un análisis **por medidor**: responde `202` con un `analysisId` y corre el pipeline en segundo plano |
+| 9 | `GET /api/ai/analysis/{id}` | el estado vivo del análisis: `status`, etapa, progreso y, al completar, las anomalías del medidor |
 | 10 | `GET /api/dashboard/summary` | contadores agregados del dashboard |
 
 Notas de contrato que conviene conocer:
 
 - El id de anomalía es **compuesto**: `<meter_id>-<detected_at en RFC3339 UTC>`.
   El listado y el detalle coinciden exactamente.
-- `POST /api/ai/analyze` **no lee body** y es **sincrónico**: corre `Run()` (que
-  es `Detect` + `Enrich`) y responde con las narrativas ya pobladas. Tarda entre
-  uno y dos minutos y medio con el proveedor real. Es una decisión de UX
-  deliberada y el frontend le informa la latencia al usuario; por eso **no** hay
-  estado pendiente que pollear.
+- `POST /api/ai/analyze` **lee un body** con `{"meter_id": "…"}` y es
+  **asíncrono**: valida el medidor (`400` si falta o no existe), responde `202`
+  con un `analysisId` y corre el pipeline en segundo plano — el determinista
+  global y después la narrativa del LLM **sólo para ese medidor**. El progreso se
+  consulta en `GET /api/ai/analysis/{id}`, que informa `status`, la etapa en
+  curso y `progress`. Un `POST` mientras ya hay una corrida en vuelo para ese
+  medidor devuelve el **mismo** `analysisId` en lugar de lanzar una segunda
+  llamada al modelo. Cuando termina, la respuesta incluye `platform` con los
+  contadores de toda la plataforma.
+- El LLM **no** corre al arrancar el servidor: sólo cuando se pide un análisis.
+  Al arrancar corre únicamente `Detect`, que es la mitad determinista y rápida,
+  para que la evidencia exista cuando llegue la primera request. Esto **revierte**
+  una decisión anterior de este proyecto (el POST síncrono con las narrativas ya
+  pobladas y sin estado pendiente); la reversión está registrada en
+  `docs/endpoints.md`.
 - `GET /api/dashboard/summary` **siempre** incluye `unvalidatedMeters`, también
   cuando no hay ninguno:
   `{"count": 0, "meters": [], "reason": "no hay suficiente información para validar: se requieren al menos 2 lecturas"}`.
