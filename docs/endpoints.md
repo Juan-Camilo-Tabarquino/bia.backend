@@ -406,6 +406,15 @@ Source: `internal/api/handlers/ai.go`, `internal/api/handlers/analysislog.go`.
 - `total_consumption` is the sum of `Consumption` over **every reading loaded**,
   across all meters, rounded to one decimal. It mirrors the per-meter
   `consumption` published by `GET /api/meters`.
+
+  The meter ids are **sorted before summing**, on purpose. `AllMeterIDs` reads a
+  map, so its order is randomised per call, and float addition is not
+  associative: the bundled dataset's exact total sits on the `.x5` rounding
+  boundary (`155250.85`), so summing in map order made this KPI flip between
+  `155250.8` and `155250.9` for identical requests. Sorting pins the accumulation
+  order. The `.1` digit of the example above is therefore stable, but it is a
+  boundary value: do not treat a one-tenth difference from another platform's
+  float arithmetic as a contract change.
 - `lastRun` is the **RFC3339 UTC timestamp** of the last `Detect()` that published
   a snapshot, read from the orchestrator (it is recorded inside the same critical
   section that publishes the evidence and bumps the snapshot generation). It

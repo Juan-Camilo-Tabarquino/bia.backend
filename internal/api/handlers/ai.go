@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -405,7 +406,15 @@ func DashboardSummary(orchestrator *analysis.Orchestrator) http.HandlerFunc {
 		// across all meters, rounded to one decimal to match the per-meter
 		// consumption published by GET /api/meters (a raw float sum leaks
 		// representation noise such as 155250.8499999999).
+		//
+		// The ids are sorted before summing because AllMeterIDs reads a map, so its
+		// order is randomised per call. Float addition is not associative and the
+		// bundled dataset's exact total sits on the .x5 rounding boundary, so
+		// summing in map order makes this KPI flip between 155250.8 and 155250.9
+		// for identical requests. Sorting pins the accumulation order, and with it
+		// the answer; do not "simplify" this away.
 		allMeterIDs := orchestrator.ReadingRepo.AllMeterIDs()
+		sort.Strings(allMeterIDs)
 		totalConsumption := 0.0
 		for _, reading := range orchestrator.ReadingRepo.ReadingsFor(allMeterIDs, nil, nil) {
 			totalConsumption += reading.Consumption
