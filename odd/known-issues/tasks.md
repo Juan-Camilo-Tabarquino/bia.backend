@@ -378,6 +378,9 @@ B1-B4 (commits `e713860` y `75a4741`) y C1 (commit `3051333`).
 - Los tres PRs (`#1`, `#2`, `#3`) están mergeados en `main`. El fix de las dos
   lecturas vive en la rama `fix/baseline-min-two-readings` (commits `6047d80` a
   `e713860`) y **todavía no está mergeado**: `main` sigue en `210f727`.
+  **Corrección posterior:** el fix **ya está mergeado** en `main`; la guarda de
+  las dos lecturas vive y está activa en `internal/analysis/baseline.go`
+  (`minReadingsForBaseline = 2`, commit `3051333`).
 - La traducción al español de la superficie de análisis **está hecha y
   verificada**; no queda texto inglés en campos visibles de usuario. Lo que
   queda en inglés son tokens de contrato, claves JSON y el body de `README.md`,

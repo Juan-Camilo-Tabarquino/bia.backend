@@ -229,6 +229,8 @@ re-run review on this candidate.
   text is a product judgement, not an execution result.
 - `/api/dashboard/summary` returns the English status tokens `ok` and `latest`.
   Same product judgement applies.
+  **Corrección posterior:** el token `latest` ya no existe: `lastRun` devuelve el
+  timestamp RFC3339 UTC del último `Detect()`. El token `ok` sigue igual.
 - Endpoints outside the anomaly surface (`/api/meters`, the readings success
   body) were not scanned for prose.
 
@@ -246,4 +248,6 @@ re-run review on this candidate.
 - The wider documentation drift found earlier (`openspec/` naming chi and
   `/api/v1`, `docs/routing.md:35` stale signature, `docs/endpoints.md`
   under-documenting the anomaly DTO) remains a separate feature.
+  **Corrección posterior:** ese drift se arregló después (commits `e713860` y
+  `75a4741`); la lista se conserva como registro.
 - The frontend's own labels for the machine tokens are that repository's concern.

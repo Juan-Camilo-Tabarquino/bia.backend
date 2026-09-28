@@ -98,3 +98,5 @@ One writer thread; the parent is the only writer here.
 - No fix of the previously identified documentation drift (`openspec/` naming chi
   and `/api/v1`, `docs/routing.md:35` stale signature, `docs/endpoints.md`
   under-documenting the anomaly DTO). Still a separate feature.
+  **Corrección posterior:** ese drift se arregló después (commits `e713860` y
+  `75a4741`); la lista se conserva como registro.

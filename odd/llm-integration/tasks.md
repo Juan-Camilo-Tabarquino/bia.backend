@@ -114,6 +114,10 @@ Ejecutado con subagentes `gentle-ai-worker` (uno por tarea, secuencial porque T2
 
 1. **`.env` usa rutas CSV relativas** (`./data/...`) y las env vars pisan al YAML: el binario **debe correrse desde la raíz del repo**. Desde otro cwd falla con `cannot find the path specified`.
 2. El arranque del server tarda ~88 s porque `Run()` hace **4 llamadas reales al modelo** (~20 s cada una) antes de escuchar. Si eso molesta, conviene un timeout menor o llamadas en paralelo (hoy son secuenciales).
+   > **Superado.** Este hallazgo ya no aplica: el arranque no hace ninguna llamada
+   > al modelo. `cmd/api/main.go` corre solo `Detect()` antes de `ListenAndServe`;
+   > la narrativa del LLM corre bajo demanda, por medidor, desde
+   > `POST /api/ai/analyze`. El cuerpo se conserva como registro.
 3. El modelo devuelve **markdown** (tablas y encabezados) en `llm_analysis`; el frontend debe renderizarlo como tal.
 4. `has_operational_event` refleja **eventos operativos**, no `Correlation.Explains`: para M-112 (evento `DATA_QUALITY`) es `false` aunque su `status` sea `explained`.
 

@@ -2,7 +2,7 @@ strict_tdd: true
 context: |
   bia.backend is a Go project.
   Detected markers: go.mod.
-  Additional evidence: Test-like files detected (5); examples: internal\analysis\baseline_test.go, internal\analysis\orchestrator_test.go, internal\api\api_test.go, internal\data\csv\loader_test.go, internal\ai\provider_test.go.
+  Additional evidence: Test-like files detected (14); examples: internal\analysis\baseline_test.go, internal\analysis\orchestrator_test.go, internal\api\api_test.go, internal\data\csv\loader_test.go, internal\ai\provider_test.go.
   Primary test command: go test ./....
   Unit tests: go test (go test ./...).
   Integration tests: Go integration tests where present (go test ./...).
@@ -21,7 +21,7 @@ rules:
   verify:
     test_command: "go test ./..."
 testing:
-  detected: "2026-09-24"
+  detected: "2026-09-27"
   runner:
     command: "go test ./..."
     framework: "go test"

@@ -294,7 +294,7 @@ The object emits 18 fields (the DTO is `AnomalyDTO` and its nested types in
 
 An empty evidence set produces `[]`.
 
-Source: `internal/api/handlers/endpoints.go:36-72, 113-169, 216-220`.
+Source: `internal/api/handlers/endpoints.go:114-150, 191-247, 294-298`.
 
 ## GET /api/anomalies/{id}
 
@@ -306,7 +306,7 @@ Source: `internal/api/handlers/endpoints.go:36-72, 113-169, 216-220`.
 - `200 OK` with a single anomaly object (same shape as a list element).
 - Unknown id: `404 Not Found` with `{"error":"anomalía <id> no encontrada"}`.
 
-Source: `internal/api/handlers/ai.go:474-491`, `internal/api/handlers/endpoints.go:104-106, 113-169`.
+Source: `internal/api/handlers/ai.go:488-505`, `internal/api/handlers/endpoints.go:104-106, 113-169`.
 
 ## POST /api/ai/analyze
 

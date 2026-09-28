@@ -128,16 +128,16 @@ El único bloqueo que necesitó decisión del usuario fue el contrato del loader
 
 ### Riesgos residuales (verificación independiente, no bloqueantes)
 
-| Sev. | Hallazgo | Archivo |
-|---|---|---|
-| HIGH | `RealProvider.GenerateExplanation` siempre devuelve `ErrProviderNotImplemented`: con `LLM_API_KEY` presente el runtime produce `LLMText` vacío (los tests usan el mock). | `internal/ai/provider.go` |
-| MED | Race detector no ejecutable (falta gcc): la afirmación "race-free" no está probada con `-race`. | entorno |
-| MED | Código muerto: paquete `internal/domain/services/` completo (16 archivos), `internal/data/csv_loader.go`, `internal/logger/`, `internal/ai/mock_client.go`, `handlers.Readings`, `handlers.AnomalyDetail`, y el parámetro `port` sin uso en `NewRouter`. | varios |
-| MED | Deriva de config: `config.yaml` usa `data.csv_path`/`data.events_path` pero el código lee `data.readings_csv`/`data.events_csv`; las claves YAML se ignoran en silencio. | `internal/config/config.go` |
-| LOW | `GET /api/meters/{id}/readings` devuelve `200 null` para medidor desconocido (nunca 404) y no está testeado. | `internal/api/router.go` |
-| LOW | Un evento `DATA_QUALITY` puede reclasificar un spike real del mismo medidor como `DATA_QUALITY` (latente, no se dispara con el dataset actual). | `internal/analysis/correlator.go` |
-| LOW | `DATA_QUALITY` usa confianza constante 0.90; severity/priority son función pura del `Type`. | `internal/analysis/scorer.go` |
-| LOW | Sin enforcement de método HTTP; `lastRun` es el literal `"latest"`. | `router.go`, `handlers/ai.go` |
+| Sev. | Hallazgo | Archivo | Estado (posterior) |
+|---|---|---|---|
+| HIGH | `RealProvider.GenerateExplanation` siempre devuelve `ErrProviderNotImplemented`: con `LLM_API_KEY` presente el runtime produce `LLMText` vacío (los tests usan el mock). | `internal/ai/provider.go` | Resuelto: `RealProvider.GenerateExplanation` implementa la llamada real a Ollama; `ErrProviderNotImplemented` ya no existe en el código. |
+| MED | Race detector no ejecutable (falta gcc): la afirmación "race-free" no está probada con `-race`. | entorno | **Sigue abierto, y comprobado en este entorno.** `go test -race` falla con `-race requires cgo`; con `CGO_ENABLED=1` falla con `cgo: C compiler "gcc" not found`. La afirmación "race-free" descansa en la inspección de los bloqueos y en la suite sin `-race`, no en el detector. Los registros de `async-llm-enrichment` y `spanish-analysis-texts` que reportan un `-race` en verde **no son reproducibles acá** y contradicen el entorno observado. |
+| MED | Código muerto: paquete `internal/domain/services/` completo (16 archivos), `internal/data/csv_loader.go`, `internal/logger/`, `internal/ai/mock_client.go`, `handlers.Readings`, `handlers.AnomalyDetail`, y el parámetro `port` sin uso en `NewRouter`. | varios | Resuelto: `internal/domain/services/`, `internal/data/csv_loader.go` y `internal/logger/` ya no existen en el árbol. |
+| MED | Deriva de config: `config.yaml` usa `data.csv_path`/`data.events_path` pero el código lee `data.readings_csv`/`data.events_csv`; las claves YAML se ignoran en silencio. | `internal/config/config.go` | — |
+| LOW | `GET /api/meters/{id}/readings` devuelve `200 null` para medidor desconocido (nunca 404) y no está testeado. | `internal/api/router.go` | — |
+| LOW | Un evento `DATA_QUALITY` puede reclasificar un spike real del mismo medidor como `DATA_QUALITY` (latente, no se dispara con el dataset actual). | `internal/analysis/correlator.go` | — |
+| LOW | `DATA_QUALITY` usa confianza constante 0.90; severity/priority son función pura del `Type`. | `internal/analysis/scorer.go` | — |
+| LOW | Sin enforcement de método HTTP; `lastRun` es el literal `"latest"`. | `router.go`, `handlers/ai.go` | `lastRun` resuelto: ahora devuelve el timestamp RFC3339 UTC del último `Detect()` (`Orchestrator.LastRun()`), no el literal `latest`. El enforcement de método HTTP sigue pendiente. |
 
 ### Commits
 
